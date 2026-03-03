@@ -4,7 +4,7 @@ This function creates a visual heatmap in the Speckle Viewer based on
 the radius of structural pipes, grouping them into 4 clusters.
 """
 
-from typing import List
+from typing import List, Optional, Tuple
 
 from specklepy.objects import Base
 from speckle_automate import (
@@ -32,6 +32,59 @@ CLUSTER_3_MAX = 1.25  # Heavy/Large: 0.95 <= radius < 1.25
 # Cluster 4: Massive/Critical: radius >= 1.25
 
 
+def get_pipe_radius(obj: Base) -> Optional[float]:
+    """Extract Pipe_Radius from an object, checking multiple possible locations.
+    
+    Args:
+        obj: A Speckle Base object.
+        
+    Returns:
+        The pipe radius as a float, or None if not found.
+    """
+    # Try direct property access (case variations)
+    for attr_name in ["Pipe_Radius", "pipe_radius", "PipeRadius", "pipeRadius"]:
+        value = getattr(obj, attr_name, None)
+        if value is not None:
+            try:
+                return float(value)
+            except (ValueError, TypeError):
+                continue
+    
+    # Try nested in parameters (common for Revit data)
+    parameters = getattr(obj, "parameters", None)
+    if parameters is not None:
+        # parameters might be a Base object or a dict
+        if isinstance(parameters, Base):
+            for attr_name in ["Pipe_Radius", "pipe_radius", "PipeRadius", "pipeRadius"]:
+                value = getattr(parameters, attr_name, None)
+                if value is not None:
+                    # Value might be a parameter object with a 'value' property
+                    if hasattr(value, "value"):
+                        try:
+                            return float(value.value)
+                        except (ValueError, TypeError):
+                            continue
+                    try:
+                        return float(value)
+                    except (ValueError, TypeError):
+                        continue
+        elif isinstance(parameters, dict):
+            for key in ["Pipe_Radius", "pipe_radius", "PipeRadius", "pipeRadius"]:
+                if key in parameters:
+                    value = parameters[key]
+                    if hasattr(value, "value"):
+                        try:
+                            return float(value.value)
+                        except (ValueError, TypeError):
+                            continue
+                    try:
+                        return float(value)
+                    except (ValueError, TypeError):
+                        continue
+    
+    return None
+
+
 def automate_function(
     automate_context: AutomationContext,
     function_inputs: FunctionInputs,
@@ -47,98 +100,99 @@ def automate_function(
         function_inputs: Function inputs (not used in this function).
     """
     _ = function_inputs  # Unused, but required by SDK
-    # Receive the model version
-    version_root_object = automate_context.receive_version()
+    
+    try:
+        # Receive the model version
+        version_root_object = automate_context.receive_version()
 
-    # Flatten and filter objects with Pipe_Radius property
-    pipes_with_radius: List[Base] = [
-        obj
-        for obj in flatten_base(version_root_object)
-        if hasattr(obj, "Pipe_Radius") and obj.Pipe_Radius is not None
-    ]
+        # Flatten and filter objects with Pipe_Radius property
+        pipes_with_radius: List[Tuple[Base, float]] = []
+        
+        for obj in flatten_base(version_root_object):
+            radius = get_pipe_radius(obj)
+            if radius is not None:
+                pipes_with_radius.append((obj, radius))
 
-    # Gracefully fail if no pipes with Pipe_Radius found
-    if not pipes_with_radius:
-        automate_context.mark_run_failed(
-            "No objects with 'Pipe_Radius' property found in the model. "
-            "Please ensure the model contains structural pipes with radius data."
+        # Gracefully fail if no pipes with Pipe_Radius found
+        if not pipes_with_radius:
+            automate_context.mark_run_failed(
+                "No objects with 'Pipe_Radius' property found in the model. "
+                "Please ensure the model contains structural pipes with radius data."
+            )
+            return
+
+        # Initialize clusters
+        cluster_1_optimal: List[Base] = []  # 0.40 <= radius < 0.65
+        cluster_2_standard: List[Base] = []  # 0.65 <= radius < 0.95
+        cluster_3_heavy: List[Base] = []  # 0.95 <= radius < 1.25
+        cluster_4_massive: List[Base] = []  # radius >= 1.25
+
+        # Classify pipes into clusters
+        for pipe, radius in pipes_with_radius:
+            if CLUSTER_1_MIN <= radius < CLUSTER_1_MAX:
+                cluster_1_optimal.append(pipe)
+            elif CLUSTER_1_MAX <= radius < CLUSTER_2_MAX:
+                cluster_2_standard.append(pipe)
+            elif CLUSTER_2_MAX <= radius < CLUSTER_3_MAX:
+                cluster_3_heavy.append(pipe)
+            elif radius >= CLUSTER_3_MAX:
+                cluster_4_massive.append(pipe)
+            # Note: pipes with radius < 0.40m are not categorized
+
+        # Apply visual feedback to each cluster
+        if cluster_1_optimal:
+            automate_context.attach_success_to_objects(
+                category="Radius 0.40m - 0.64m (Optimal)",
+                affected_objects=cluster_1_optimal,
+                message=f"{len(cluster_1_optimal)} pipes with small/optimal radius",
+            )
+
+        if cluster_2_standard:
+            automate_context.attach_info_to_objects(
+                category="Radius 0.65m - 0.94m (Standard)",
+                affected_objects=cluster_2_standard,
+                message=f"{len(cluster_2_standard)} pipes with standard/medium radius",
+            )
+
+        if cluster_3_heavy:
+            automate_context.attach_warning_to_objects(
+                category="Radius 0.95m - 1.24m (Heavy)",
+                affected_objects=cluster_3_heavy,
+                message=f"{len(cluster_3_heavy)} pipes with heavy/large radius",
+            )
+
+        if cluster_4_massive:
+            automate_context.attach_error_to_objects(
+                category="Radius >= 1.25m (Critical)",
+                affected_objects=cluster_4_massive,
+                message=f"{len(cluster_4_massive)} pipes with massive/critical radius",
+            )
+
+        # Build summary
+        total_processed = (
+            len(cluster_1_optimal)
+            + len(cluster_2_standard)
+            + len(cluster_3_heavy)
+            + len(cluster_4_massive)
         )
-        return
 
-    # Initialize clusters
-    cluster_1_optimal: List[Base] = []  # 0.40 <= radius < 0.65
-    cluster_2_standard: List[Base] = []  # 0.65 <= radius < 0.95
-    cluster_3_heavy: List[Base] = []  # 0.95 <= radius < 1.25
-    cluster_4_massive: List[Base] = []  # radius >= 1.25
-
-    # Classify pipes into clusters
-    for pipe in pipes_with_radius:
-        radius = float(pipe.Pipe_Radius)
-
-        if CLUSTER_1_MIN <= radius < CLUSTER_1_MAX:
-            cluster_1_optimal.append(pipe)
-        elif CLUSTER_1_MAX <= radius < CLUSTER_2_MAX:
-            cluster_2_standard.append(pipe)
-        elif CLUSTER_2_MAX <= radius < CLUSTER_3_MAX:
-            cluster_3_heavy.append(pipe)
-        elif radius >= CLUSTER_3_MAX:
-            cluster_4_massive.append(pipe)
-        # Note: pipes with radius < 0.40m are not categorized
-
-    # Apply visual feedback to each cluster
-    if cluster_1_optimal:
-        automate_context.attach_success_to_objects(
-            category="Radius 0.40m - 0.64m (Optimal)",
-            affected_objects=cluster_1_optimal,
-            message=f"{len(cluster_1_optimal)} pipes with small/optimal radius",
+        summary = (
+            f"Processed {total_processed} structural pipes: "
+            f"Optimal={len(cluster_1_optimal)}, "
+            f"Standard={len(cluster_2_standard)}, "
+            f"Heavy={len(cluster_3_heavy)}, "
+            f"Critical={len(cluster_4_massive)}"
         )
 
-    if cluster_2_standard:
-        automate_context.attach_info_to_objects(
-            category="Radius 0.65m - 0.94m (Standard)",
-            affected_objects=cluster_2_standard,
-            message=f"{len(cluster_2_standard)} pipes with standard/medium radius",
-        )
-
-    if cluster_3_heavy:
-        automate_context.attach_warning_to_objects(
-            category="Radius 0.95m - 1.24m (Heavy)",
-            affected_objects=cluster_3_heavy,
-            message=f"{len(cluster_3_heavy)} pipes with heavy/large radius",
-        )
-
-    if cluster_4_massive:
-        automate_context.attach_error_to_objects(
-            category="Radius >= 1.25m (Critical)",
-            affected_objects=cluster_4_massive,
-            message=f"{len(cluster_4_massive)} pipes with massive/critical radius",
-        )
-
-    # Build summary
-    total_processed = (
-        len(cluster_1_optimal)
-        + len(cluster_2_standard)
-        + len(cluster_3_heavy)
-        + len(cluster_4_massive)
-    )
-
-    summary = (
-        f"Processed {total_processed} structural pipes: "
-        f"Optimal={len(cluster_1_optimal)}, "
-        f"Standard={len(cluster_2_standard)}, "
-        f"Heavy={len(cluster_3_heavy)}, "
-        f"Critical={len(cluster_4_massive)}"
-    )
-
-    automate_context.mark_run_success(summary)
+        automate_context.mark_run_success(summary)
+        
+    except Exception as e:
+        automate_context.mark_run_exception(f"Unexpected error: {str(e)}")
 
 
 # Entry point
 if __name__ == "__main__":
     execute_automate_function(automate_function, FunctionInputs)
-    
-    
-
 
 from speckle_automate import AutomateBase, AutomationContext, execute_automate_function
 from flatten import flatten_base
