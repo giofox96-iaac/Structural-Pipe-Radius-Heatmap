@@ -215,6 +215,9 @@ def automate_function(
             f"Critical={len(cluster_4_massive)}"
         )
 
+        # Set context view to show colored objects in the Speckle viewer
+        automate_context.set_context_view()
+
         automate_context.mark_run_success(summary)
         
     except Exception as e:
