@@ -1,11 +1,13 @@
-"""This module contains the function's business logic.
+"""Structural Pipe Radius Heatmap - Speckle Automate Function.
 
-Use the automation_context module to wrap your function in an Automate context helper.
+This function creates a visual heatmap in the Speckle Viewer based on
+the radius of structural pipes, grouping them into 4 clusters.
 """
 
-from pydantic import Field, SecretStr
+from typing import List
+
+from specklepy.objects import Base
 from speckle_automate import (
-    AutomateBase,
     AutomationContext,
     execute_automate_function,
 )
@@ -13,91 +15,113 @@ from speckle_automate import (
 from flatten import flatten_base
 
 
-class FunctionInputs(AutomateBase):
-    """These are function author-defined values.
-
-    Automate will make sure to supply them matching the types specified here.
-    Please use the pydantic model schema to define your inputs:
-    https://docs.pydantic.dev/latest/usage/models/
-    """
-
-    # An example of how to use secret values.
-    whisper_message: SecretStr = Field(title="This is a secret message")
-    forbidden_speckle_type: str = Field(
-        title="Forbidden speckle type",
-        description=(
-            "If a object has the following speckle_type,"
-            " it will be marked with an error."
-        ),
-    )
+# Cluster thresholds (in meters)
+CLUSTER_1_MIN = 0.40  # Optimal/Small: 0.40 <= radius < 0.65
+CLUSTER_1_MAX = 0.65
+CLUSTER_2_MAX = 0.95  # Standard/Medium: 0.65 <= radius < 0.95
+CLUSTER_3_MAX = 1.25  # Heavy/Large: 0.95 <= radius < 1.25
+# Cluster 4: Massive/Critical: radius >= 1.25
 
 
-def automate_function(
-    automate_context: AutomationContext,
-    function_inputs: FunctionInputs,
-) -> None:
-    """This is an example Speckle Automate function.
+def automate_function(automate_context: AutomationContext) -> None:
+    """Analyze structural pipes and create a visual heatmap based on Pipe_Radius.
+
+    Groups pipes into 4 clusters based on their radius and applies visual
+    feedback using semantic states (success, info, warning, error).
 
     Args:
-        automate_context: A context-helper object that carries relevant information
-            about the runtime context of this function.
-            It gives access to the Speckle project data that triggered this run.
-            It also has convenient methods for attaching results to the Speckle model.
-        function_inputs: An instance object matching the defined schema.
+        automate_context: Runtime context providing access to Speckle data
+            and methods for attaching results.
     """
-    # The context provides a convenient way to receive the triggering version.
+    # Receive the model version
     version_root_object = automate_context.receive_version()
 
-    objects_with_forbidden_speckle_type = [
-        b
-        for b in flatten_base(version_root_object)
-        if b.speckle_type == function_inputs.forbidden_speckle_type
+    # Flatten and filter objects with Pipe_Radius property
+    pipes_with_radius: List[Base] = [
+        obj
+        for obj in flatten_base(version_root_object)
+        if hasattr(obj, "Pipe_Radius") and obj.Pipe_Radius is not None
     ]
-    count = len(objects_with_forbidden_speckle_type)
 
-    if count > 0:
-        # This is how a run is marked with a failure cause.
-        automate_context.attach_error_to_objects(
-            category="Forbidden speckle_type"
-            f" ({function_inputs.forbidden_speckle_type})",
-            affected_objects=objects_with_forbidden_speckle_type,
-            message="This project should not contain the type: "
-            f"{function_inputs.forbidden_speckle_type}",
-        )
+    # Gracefully fail if no pipes with Pipe_Radius found
+    if not pipes_with_radius:
         automate_context.mark_run_failed(
-            "Automation failed: "
-            f"Found {count} object that have one of the forbidden speckle types: "
-            f"{function_inputs.forbidden_speckle_type}"
+            "No objects with 'Pipe_Radius' property found in the model. "
+            "Please ensure the model contains structural pipes with radius data."
+        )
+        return
+
+    # Initialize clusters
+    cluster_1_optimal: List[Base] = []  # 0.40 <= radius < 0.65
+    cluster_2_standard: List[Base] = []  # 0.65 <= radius < 0.95
+    cluster_3_heavy: List[Base] = []  # 0.95 <= radius < 1.25
+    cluster_4_massive: List[Base] = []  # radius >= 1.25
+
+    # Classify pipes into clusters
+    for pipe in pipes_with_radius:
+        radius = float(pipe.Pipe_Radius)
+
+        if CLUSTER_1_MIN <= radius < CLUSTER_1_MAX:
+            cluster_1_optimal.append(pipe)
+        elif CLUSTER_1_MAX <= radius < CLUSTER_2_MAX:
+            cluster_2_standard.append(pipe)
+        elif CLUSTER_2_MAX <= radius < CLUSTER_3_MAX:
+            cluster_3_heavy.append(pipe)
+        elif radius >= CLUSTER_3_MAX:
+            cluster_4_massive.append(pipe)
+        # Note: pipes with radius < 0.40m are not categorized
+
+    # Apply visual feedback to each cluster
+    if cluster_1_optimal:
+        automate_context.attach_success_to_objects(
+            category="Radius 0.40m - 0.64m (Optimal)",
+            affected_objects=cluster_1_optimal,
+            message=f"{len(cluster_1_optimal)} pipes with small/optimal radius",
         )
 
-        # Set the automation context view to the original model/version view
-        # to show the offending objects.
-        automate_context.set_context_view()
+    if cluster_2_standard:
+        automate_context.attach_info_to_objects(
+            category="Radius 0.65m - 0.94m (Standard)",
+            affected_objects=cluster_2_standard,
+            message=f"{len(cluster_2_standard)} pipes with standard/medium radius",
+        )
 
-    else:
-        automate_context.mark_run_success("No forbidden types found.")
+    if cluster_3_heavy:
+        automate_context.attach_warning_to_objects(
+            category="Radius 0.95m - 1.24m (Heavy)",
+            affected_objects=cluster_3_heavy,
+            message=f"{len(cluster_3_heavy)} pipes with heavy/large radius",
+        )
 
-    # If the function generates file results, this is how it can be
-    # attached to the Speckle project/model
-    # automate_context.store_file_result("./report.pdf")
+    if cluster_4_massive:
+        automate_context.attach_error_to_objects(
+            category="Radius >= 1.25m (Critical)",
+            affected_objects=cluster_4_massive,
+            message=f"{len(cluster_4_massive)} pipes with massive/critical radius",
+        )
+
+    # Build summary
+    total_processed = (
+        len(cluster_1_optimal)
+        + len(cluster_2_standard)
+        + len(cluster_3_heavy)
+        + len(cluster_4_massive)
+    )
+
+    summary = (
+        f"Processed {total_processed} structural pipes: "
+        f"Optimal={len(cluster_1_optimal)}, "
+        f"Standard={len(cluster_2_standard)}, "
+        f"Heavy={len(cluster_3_heavy)}, "
+        f"Critical={len(cluster_4_massive)}"
+    )
+
+    automate_context.mark_run_success(summary)
 
 
-def automate_function_without_inputs(automate_context: AutomationContext) -> None:
-    """A function example without inputs.
-
-    If your function does not need any input variables,
-     besides what the automation context provides,
-     the inputs argument can be omitted.
-    """
-    pass
-
-
-# make sure to call the function with the executor
+# Entry point
 if __name__ == "__main__":
-    # NOTE: always pass in the automate function by its reference; do not invoke it!
-
-    # Pass in the function reference with the inputs schema to the executor.
-    execute_automate_function(automate_function, FunctionInputs)
+    execute_automate_function(automate_function)
 
     # If the function has no arguments, the executor can handle it like so
     # execute_automate_function(automate_function_without_inputs)
