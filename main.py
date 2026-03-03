@@ -101,3 +101,65 @@ if __name__ == "__main__":
 
     # If the function has no arguments, the executor can handle it like so
     # execute_automate_function(automate_function_without_inputs)
+    
+    
+
+
+from speckle_automate import AutomateBase, AutomationContext, execute_automate_function
+from flatten import flatten_base
+
+class FunctionInputs(AutomateBase):
+    # No user inputs required, the app runs automatically by reading the model properties
+    pass 
+
+def automate_function(automate_context: AutomationContext, function_inputs: FunctionInputs) -> None:
+    # 1. Receive and flatten the incoming model data
+    version_root = automate_context.receive_version()
+    all_objects = flatten_base(version_root)
+
+    # 2. Search for the exact property "Pipe_Radius"
+    pipes = [obj for obj in all_objects if getattr(obj, "Pipe_Radius", None) is not None]
+
+    if not pipes:
+        automate_context.mark_run_failed("No elements with the 'Pipe_Radius' property were found in the model.")
+        return
+
+    # 3. Create the 4 Clusters in METERS (0.40m -> 1.50m)
+    cluster_green = [p for p in pipes if 0.40 <= getattr(p, "Pipe_Radius", 0) < 0.65]
+    cluster_blue = [p for p in pipes if 0.65 <= getattr(p, "Pipe_Radius", 0) < 0.95]
+    cluster_yellow = [p for p in pipes if 0.95 <= getattr(p, "Pipe_Radius", 0) < 1.25]
+    cluster_red = [p for p in pipes if getattr(p, "Pipe_Radius", 0) >= 1.25]
+
+    # 4. Assign colors (Semantic States) in the Speckle Viewer
+    if cluster_green:
+        automate_context.attach_success_to_objects(
+            category="Radius 0.40m - 0.64m", 
+            affected_objects=cluster_green, 
+            message="Optimal profile"
+        )
+    if cluster_blue:
+        automate_context.attach_info_to_objects(
+            category="Radius 0.65m - 0.94m", 
+            affected_objects=cluster_blue, 
+            message="Standard profile"
+        )
+    if cluster_yellow:
+        automate_context.attach_warning_to_objects(
+            category="Radius 0.95m - 1.24m", 
+            affected_objects=cluster_yellow, 
+            message="Heavy profile"
+        )
+    if cluster_red:
+        automate_context.attach_error_to_objects(
+            category="Radius >= 1.25m", 
+            affected_objects=cluster_red, 
+            message="Massive profile"
+        )
+
+    # 5. Final success message
+    automate_context.mark_run_success(
+        f"Heatmap successfully applied! Processed and color-coded {len(pipes)} structural elements."
+    )
+
+if __name__ == "__main__":
+    execute_automate_function(automate_function, FunctionInputs)
