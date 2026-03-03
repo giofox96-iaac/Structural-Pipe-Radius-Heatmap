@@ -35,52 +35,83 @@ CLUSTER_3_MAX = 1.25  # Heavy/Large: 0.95 <= radius < 1.25
 def get_pipe_radius(obj: Base) -> Optional[float]:
     """Extract Pipe_Radius from an object, checking multiple possible locations.
     
+    Handles Grasshopper data where properties are stored in a nested 'properties' object.
+    
     Args:
         obj: A Speckle Base object.
         
     Returns:
         The pipe radius as a float, or None if not found.
     """
-    # Try direct property access (case variations)
-    for attr_name in ["Pipe_Radius", "pipe_radius", "PipeRadius", "pipeRadius"]:
-        value = getattr(obj, attr_name, None)
-        if value is not None:
-            try:
-                return float(value)
-            except (ValueError, TypeError):
-                continue
+    attr_names = ["Pipe_Radius", "pipe_radius", "PipeRadius", "pipeRadius"]
     
-    # Try nested in parameters (common for Revit data)
+    # Helper to safely get float value
+    def try_get_float(value) -> Optional[float]:
+        if value is None:
+            return None
+        # Handle parameter objects with 'value' property
+        if hasattr(value, "value"):
+            value = value.value
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return None
+    
+    # Helper to search in an object (Base or dict) for the attribute
+    def search_in_obj(container) -> Optional[float]:
+        if container is None:
+            return None
+        
+        for attr_name in attr_names:
+            value = None
+            
+            # Try getattr for Base objects
+            if isinstance(container, Base):
+                value = getattr(container, attr_name, None)
+                # Also try dict-style access for dynamic properties
+                if value is None:
+                    try:
+                        value = container[attr_name]
+                    except (KeyError, TypeError):
+                        pass
+            # Try dict access
+            elif isinstance(container, dict):
+                value = container.get(attr_name)
+            
+            result = try_get_float(value)
+            if result is not None:
+                return result
+        
+        return None
+    
+    # 1. Try direct property access on the object
+    result = search_in_obj(obj)
+    if result is not None:
+        return result
+    
+    # 2. Try nested in 'properties' (Grasshopper data structure)
+    properties = getattr(obj, "properties", None)
+    if properties is None:
+        try:
+            properties = obj["properties"]
+        except (KeyError, TypeError):
+            pass
+    
+    result = search_in_obj(properties)
+    if result is not None:
+        return result
+    
+    # 3. Try nested in '@properties' (alternative Speckle convention)
+    properties = getattr(obj, "@properties", None)
+    result = search_in_obj(properties)
+    if result is not None:
+        return result
+    
+    # 4. Try nested in 'parameters' (Revit data)
     parameters = getattr(obj, "parameters", None)
-    if parameters is not None:
-        # parameters might be a Base object or a dict
-        if isinstance(parameters, Base):
-            for attr_name in ["Pipe_Radius", "pipe_radius", "PipeRadius", "pipeRadius"]:
-                value = getattr(parameters, attr_name, None)
-                if value is not None:
-                    # Value might be a parameter object with a 'value' property
-                    if hasattr(value, "value"):
-                        try:
-                            return float(value.value)
-                        except (ValueError, TypeError):
-                            continue
-                    try:
-                        return float(value)
-                    except (ValueError, TypeError):
-                        continue
-        elif isinstance(parameters, dict):
-            for key in ["Pipe_Radius", "pipe_radius", "PipeRadius", "pipeRadius"]:
-                if key in parameters:
-                    value = parameters[key]
-                    if hasattr(value, "value"):
-                        try:
-                            return float(value.value)
-                        except (ValueError, TypeError):
-                            continue
-                    try:
-                        return float(value)
-                    except (ValueError, TypeError):
-                        continue
+    result = search_in_obj(parameters)
+    if result is not None:
+        return result
     
     return None
 
