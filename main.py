@@ -8,11 +8,20 @@ from typing import List
 
 from specklepy.objects import Base
 from speckle_automate import (
+    AutomateBase,
     AutomationContext,
     execute_automate_function,
 )
 
 from flatten import flatten_base
+
+
+class FunctionInputs(AutomateBase):
+    """No user inputs required for this function.
+    
+    The clustering thresholds are predefined.
+    """
+    pass
 
 
 # Cluster thresholds (in meters)
@@ -23,7 +32,10 @@ CLUSTER_3_MAX = 1.25  # Heavy/Large: 0.95 <= radius < 1.25
 # Cluster 4: Massive/Critical: radius >= 1.25
 
 
-def automate_function(automate_context: AutomationContext) -> None:
+def automate_function(
+    automate_context: AutomationContext,
+    function_inputs: FunctionInputs,
+) -> None:
     """Analyze structural pipes and create a visual heatmap based on Pipe_Radius.
 
     Groups pipes into 4 clusters based on their radius and applies visual
@@ -32,7 +44,9 @@ def automate_function(automate_context: AutomationContext) -> None:
     Args:
         automate_context: Runtime context providing access to Speckle data
             and methods for attaching results.
+        function_inputs: Function inputs (not used in this function).
     """
+    _ = function_inputs  # Unused, but required by SDK
     # Receive the model version
     version_root_object = automate_context.receive_version()
 
@@ -121,10 +135,7 @@ def automate_function(automate_context: AutomationContext) -> None:
 
 # Entry point
 if __name__ == "__main__":
-    execute_automate_function(automate_function)
-
-    # If the function has no arguments, the executor can handle it like so
-    # execute_automate_function(automate_function_without_inputs)
+    execute_automate_function(automate_function, FunctionInputs)
     
     
 
