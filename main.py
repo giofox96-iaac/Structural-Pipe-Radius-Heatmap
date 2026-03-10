@@ -41,11 +41,13 @@ CLUSTER_3_MAX = 1.25  # Heavy/Large: 0.95 <= radius < 1.25
 # Cluster 4: Massive/Critical: radius >= 1.25
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SLAB AREA THRESHOLDS (in square meters)
+# SLAB AREA THRESHOLDS (Floor_Slab_Area values)
 # ═══════════════════════════════════════════════════════════════════════════════
-SLAB_SMALL_MAX = 50.0    # Small/Standard: area < 50
-SLAB_MEDIUM_MAX = 150.0  # Medium: 50 <= area <= 150
-# Massive: area > 150
+SLAB_CLUSTER_1_MAX = 1500.0    # Cluster 1: area < 1500
+SLAB_CLUSTER_2_MAX = 5000.0    # Cluster 2: 1500 <= area < 5000
+SLAB_CLUSTER_3_MAX = 12500.0   # Cluster 3: 5000 <= area < 12500
+SLAB_CLUSTER_4_MAX = 25000.0   # Cluster 4: 12500 <= area < 25000
+# Cluster 5: area >= 25000
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # VOLUME THRESHOLD (in cubic meters)
@@ -145,50 +147,78 @@ def get_pipe_radius(obj: Base) -> Optional[float]:
     return get_float_property(obj, ["Pipe_Radius", "pipe_radius", "PipeRadius", "pipeRadius"])
 
 
-def get_area(obj: Base) -> Optional[float]:
-    """Extract area from an object."""
-    return get_float_property(obj, ["area", "Area", "AREA", "surface_area", "SurfaceArea"])
+# ═══════════════════════════════════════════════════════════════════════════════
+# GRASSHOPPER PROPERTY GETTERS (exact names from Grasshopper script)
+# ═══════════════════════════════════════════════════════════════════════════════
 
-
-def get_volume(obj: Base) -> Optional[float]:
-    """Extract volume from an object."""
-    return get_float_property(obj, ["volume", "Volume", "VOLUME"])
-
-
-def get_thickness(obj: Base) -> Optional[float]:
-    """Extract thickness from an object."""
-    return get_float_property(obj, ["thickness", "Thickness", "THICKNESS", "depth", "Depth"])
-
-
-def get_length(obj: Base) -> Optional[float]:
-    """Extract length from an object."""
-    return get_float_property(obj, ["length", "Length", "LENGTH", "Pipe_Lenght", "pipe_length"])
-
-
-def get_height(obj: Base) -> Optional[float]:
-    """Extract height from an object."""
-    return get_float_property(obj, ["height", "Height", "HEIGHT"])
-
-
-def get_weight(obj: Base) -> Optional[float]:
-    """Extract weight from an object."""
-    return get_float_property(obj, ["weight", "Weight", "WEIGHT", "mass", "Mass"])
+def get_structural_role(obj: Base) -> Optional[str]:
+    """Extract Structural_Role from an object."""
+    value = get_property_value(obj, ["Structural_Role"])
+    return str(value) if value is not None else None
 
 
 def get_material(obj: Base) -> Optional[str]:
-    """Extract material from an object."""
-    value = get_property_value(obj, ["material", "Material", "MATERIAL", "materialName"])
-    if value is not None:
-        return str(value)
-    return None
+    """Extract Material from an object."""
+    value = get_property_value(obj, ["Material"])
+    return str(value) if value is not None else None
+
+
+def get_density(obj: Base) -> Optional[float]:
+    """Extract Density (kg/m³) from an object."""
+    return get_float_property(obj, ["Density (kg/m³)", "Density"])
+
+
+# Pipe properties
+def get_pipe_lenght(obj: Base) -> Optional[float]:
+    """Extract Pipe_Lenght from an object (typo preserved from Grasshopper)."""
+    return get_float_property(obj, ["Pipe_Lenght"])
+
+
+# Joint properties
+def get_joint_tipe(obj: Base) -> Optional[str]:
+    """Extract Joint_Tipe from an object (typo preserved from Grasshopper)."""
+    value = get_property_value(obj, ["Joint_Tipe"])
+    return str(value) if value is not None else None
+
+
+# Floor Slab properties
+def get_floor_slab_area(obj: Base) -> Optional[float]:
+    """Extract Floor_Slab_Area from an object."""
+    return get_float_property(obj, ["Floor_Slab_Area"])
+
+
+def get_floor_slab_thickness(obj: Base) -> Optional[float]:
+    """Extract Floor_Slab_Thickness from an object."""
+    return get_float_property(obj, ["Floor_Slab_Thickness"])
+
+
+def get_floor_slab_volume(obj: Base) -> Optional[float]:
+    """Extract Floor_Slab_Volume from an object."""
+    return get_float_property(obj, ["Floor_Slab_Volume"])
+
+
+# Core properties
+def get_core_height(obj: Base) -> Optional[float]:
+    """Extract Core_Height from an object."""
+    return get_float_property(obj, ["Core_Height"])
+
+
+# Cable properties
+def get_cables_volume(obj: Base) -> Optional[float]:
+    """Extract Cables_Volume from an object."""
+    return get_float_property(obj, ["Cables_Volume"])
+
+
+# Belt Truss properties
+def get_truss_belt_volume(obj: Base) -> Optional[float]:
+    """Extract Truss_Belt_Volume from an object."""
+    return get_float_property(obj, ["Truss_Belt_Volume"])
 
 
 def get_name(obj: Base) -> Optional[str]:
     """Extract name from an object."""
     value = get_property_value(obj, ["name", "Name", "NAME"])
-    if value is not None:
-        return str(value)
-    return None
+    return str(value) if value is not None else None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -205,6 +235,26 @@ def categorize_element(obj: Base) -> str:
     if get_pipe_radius(obj) is not None:
         return "Diagrid_Pipe"
     
+    # Check for Floor Slab properties
+    if get_floor_slab_area(obj) is not None:
+        return "Floor_Slab"
+    
+    # Check for Core properties
+    if get_core_height(obj) is not None:
+        return "Core"
+    
+    # Check for Cable properties
+    if get_cables_volume(obj) is not None:
+        return "Cables"
+    
+    # Check for Belt Truss properties
+    if get_truss_belt_volume(obj) is not None:
+        return "Belt_Truss"
+    
+    # Check for Joint properties
+    if get_joint_tipe(obj) is not None:
+        return "Joint"
+    
     # Check speckle_type if available
     speckle_type = getattr(obj, "speckle_type", "") or ""
     name = get_name(obj) or ""
@@ -212,7 +262,7 @@ def categorize_element(obj: Base) -> str:
     # Check by name patterns
     name_lower = name.lower()
     if "slab" in name_lower or "floor" in name_lower:
-        return "Slab"
+        return "Floor_Slab"
     if "core" in name_lower or "wall" in name_lower:
         return "Core"
     if "diagrid" in name_lower or "pipe" in name_lower:
@@ -221,10 +271,16 @@ def categorize_element(obj: Base) -> str:
         return "Beam"
     if "column" in name_lower:
         return "Column"
+    if "cable" in name_lower:
+        return "Cables"
+    if "truss" in name_lower:
+        return "Belt_Truss"
+    if "joint" in name_lower:
+        return "Joint"
     
     # Check by speckle_type
     if "Floor" in speckle_type or "Slab" in speckle_type:
-        return "Slab"
+        return "Floor_Slab"
     if "Wall" in speckle_type:
         return "Core"
     if "Beam" in speckle_type:
@@ -234,36 +290,42 @@ def categorize_element(obj: Base) -> str:
     if "Pipe" in speckle_type:
         return "Diagrid_Pipe"
     
-    # Check by available properties
-    has_area = get_area(obj) is not None
-    has_thickness = get_thickness(obj) is not None
-    has_height = get_height(obj) is not None
-    has_length = get_length(obj) is not None
-    
-    if has_area and has_thickness and not has_height:
-        return "Slab"
-    if has_height and not has_length:
-        return "Core"
-    if has_length:
-        return "Diagrid_Pipe"
-    
     return "Other"
 
 
 def extract_element_data(obj: Base, collection_name: Optional[str] = None) -> Dict[str, Any]:
     """Extract Grasshopper-specific properties from an element.
     
-    Only includes properties that come from the Grasshopper workflow:
-    - name, Pipe_Radius, Pipe_Lenght (typo preserved), area, volume
+    Properties per collection (from Grasshopper script):
+    - Pipes: Structural_Role, Pipe_Lenght, Pipe_Radius, Material, Density
+    - Joints: Structural_Role, Joint_Tipe, Material, Density
+    - Floor Slabs: Structural_Role, Material, Floor_Slab_Area, Floor_Slab_Thickness, Floor_Slab_Volume, Density
+    - Cores: Structural_Role, Material, Density, Core_Height
+    - Cables: Structural_Role, Material, Density, Cables_Volume
+    - Belt Truss: Structural_Role, Material, Density, Truss_Belt_Volume
     """
     return {
         "id": getattr(obj, "id", None),
         "collection": collection_name,
-        "name": get_name(obj),
+        # Common properties
+        "Structural_Role": get_structural_role(obj),
+        "Material": get_material(obj),
+        "Density (kg/m³)": get_density(obj),
+        # Pipe properties
         "Pipe_Radius": get_pipe_radius(obj),
-        "Pipe_Lenght": get_length(obj),  # Note: typo preserved from Grasshopper
-        "area": get_area(obj),
-        "volume": get_volume(obj),
+        "Pipe_Lenght": get_pipe_lenght(obj),
+        # Joint properties
+        "Joint_Tipe": get_joint_tipe(obj),
+        # Floor Slab properties
+        "Floor_Slab_Area": get_floor_slab_area(obj),
+        "Floor_Slab_Thickness": get_floor_slab_thickness(obj),
+        "Floor_Slab_Volume": get_floor_slab_volume(obj),
+        # Core properties
+        "Core_Height": get_core_height(obj),
+        # Cable properties
+        "Cables_Volume": get_cables_volume(obj),
+        # Belt Truss properties
+        "Truss_Belt_Volume": get_truss_belt_volume(obj),
     }
 
 
@@ -299,27 +361,13 @@ def generate_reports(
     
     for collection in collections:
         df_collection = df_all[df_all["collection"] == collection].copy()
-        
-        # Calculate summary statistics
-        summary_row = {
-            "id": "SUMMARY",
-            "collection": collection,
-            "name": f"Total Elements: {len(df_collection)}",
-            "Pipe_Radius": None,
-            "Pipe_Lenght": df_collection["Pipe_Lenght"].sum() if "Pipe_Lenght" in df_collection else None,
-            "area": df_collection["area"].sum() if "area" in df_collection else None,
-            "volume": df_collection["volume"].sum() if "volume" in df_collection else None,
-        }
-        
-        # Append summary row
-        df_with_summary = pd.concat([df_collection, pd.DataFrame([summary_row])], ignore_index=True)
-        collection_dfs[collection] = df_with_summary
+        collection_dfs[collection] = df_collection
         
         # Generate individual CSV per collection
         safe_name = "".join(c if c.isalnum() or c in " _-" else "_" for c in collection)
         csv_filename = f"Structural_Data_{safe_name}.csv"
         csv_path = os.path.join(temp_dir, csv_filename)
-        df_with_summary.to_csv(csv_path, index=False)
+        df_collection.to_csv(csv_path, index=False)
         
         try:
             automate_context.store_file_result(csv_path)
@@ -344,16 +392,22 @@ def generate_reports(
             # Summary sheet
             summary_data = []
             for collection, df in collection_dfs.items():
-                element_count = len(df) - 1  # Exclude summary row
-                total_area = df["area"].iloc[:-1].sum() if "area" in df else 0
-                total_volume = df["volume"].iloc[:-1].sum() if "volume" in df else 0
-                total_length = df["Pipe_Lenght"].iloc[:-1].sum() if "Pipe_Lenght" in df else 0
+                element_count = len(df)
+                # Sum relevant columns based on what's available
+                total_pipe_length = df["Pipe_Lenght"].sum() if "Pipe_Lenght" in df.columns else 0
+                total_slab_area = df["Floor_Slab_Area"].sum() if "Floor_Slab_Area" in df.columns else 0
+                total_slab_volume = df["Floor_Slab_Volume"].sum() if "Floor_Slab_Volume" in df.columns else 0
+                total_cables_volume = df["Cables_Volume"].sum() if "Cables_Volume" in df.columns else 0
+                total_truss_volume = df["Truss_Belt_Volume"].sum() if "Truss_Belt_Volume" in df.columns else 0
+                
                 summary_data.append({
                     "Collection": collection,
                     "Element Count": element_count,
-                    "Total Pipe Length (m)": round(total_length, 2) if pd.notna(total_length) else 0,
-                    "Total Area (m²)": round(total_area, 2) if pd.notna(total_area) else 0,
-                    "Total Volume (m³)": round(total_volume, 2) if pd.notna(total_volume) else 0,
+                    "Total Pipe_Lenght": round(total_pipe_length, 2) if pd.notna(total_pipe_length) else 0,
+                    "Total Floor_Slab_Area": round(total_slab_area, 2) if pd.notna(total_slab_area) else 0,
+                    "Total Floor_Slab_Volume": round(total_slab_volume, 2) if pd.notna(total_slab_volume) else 0,
+                    "Total Cables_Volume": round(total_cables_volume, 2) if pd.notna(total_cables_volume) else 0,
+                    "Total Truss_Belt_Volume": round(total_truss_volume, 2) if pd.notna(total_truss_volume) else 0,
                 })
             
             df_summary = pd.DataFrame(summary_data)
@@ -488,7 +542,7 @@ def automate_function(
         )
 
         # ═══════════════════════════════════════════════════════════════════════
-        # 3. SLAB PANEL AREA HEATMAP (ONLY "Floor slabs" COLLECTION)
+        # 3. SLAB PANEL AREA HEATMAP (ONLY "Floor Slabs" COLLECTION)
         # ═══════════════════════════════════════════════════════════════════════
         slabs_with_area: List[Tuple[Base, float]] = []
         
@@ -498,57 +552,85 @@ def automate_function(
             if coll_name:
                 collection_names_found.add(coll_name)
         
-        # Filter to only objects from "Floor slabs" collection (case-insensitive)
+        # Filter to only objects from "Floor Slabs" collection (case-insensitive)
         for obj, collection_name in all_objects_with_collection:
             if collection_name and "floor" in collection_name.lower() and "slab" in collection_name.lower():
-                area = get_area(obj)
+                area = get_floor_slab_area(obj)
                 if area is not None and area > 0:
                     slabs_with_area.append((obj, area))
         
-        # Initialize slab clusters
-        slab_small: List[Base] = []   # area < 50
-        slab_medium: List[Base] = []  # 50 <= area <= 150
-        slab_massive: List[Base] = []  # area > 150
+        # Initialize slab clusters (5 clusters with thresholds: 1500, 5000, 12500, 25000)
+        slab_cluster_1: List[Base] = []   # area < 1500
+        slab_cluster_2: List[Base] = []   # 1500 <= area < 5000
+        slab_cluster_3: List[Base] = []   # 5000 <= area < 12500
+        slab_cluster_4: List[Base] = []   # 12500 <= area < 25000
+        slab_cluster_5: List[Base] = []   # area >= 25000
         
         for slab, area in slabs_with_area:
-            if area < SLAB_SMALL_MAX:
-                slab_small.append(slab)
-            elif area <= SLAB_MEDIUM_MAX:
-                slab_medium.append(slab)
+            if area < SLAB_CLUSTER_1_MAX:
+                slab_cluster_1.append(slab)
+            elif area < SLAB_CLUSTER_2_MAX:
+                slab_cluster_2.append(slab)
+            elif area < SLAB_CLUSTER_3_MAX:
+                slab_cluster_3.append(slab)
+            elif area < SLAB_CLUSTER_4_MAX:
+                slab_cluster_4.append(slab)
             else:
-                slab_massive.append(slab)
+                slab_cluster_5.append(slab)
         
         # Apply visual feedback to slab clusters
-        if slab_small:
+        if slab_cluster_1:
             automate_context.attach_success_to_objects(
-                category="Slab Area < 50m² (Small)",
-                affected_objects=slab_small,
-                message=f"{len(slab_small)} panels - Optimal Pouring Size",
+                category="Slab Area < 1500 (Cluster 1)",
+                affected_objects=slab_cluster_1,
+                message=f"{len(slab_cluster_1)} panels - Small Panel",
             )
         
-        if slab_medium:
+        if slab_cluster_2:
             automate_context.attach_info_to_objects(
-                category="Slab Area 50-150m² (Medium)",
-                affected_objects=slab_medium,
-                message=f"{len(slab_medium)} panels - Standard Pouring Size",
+                category="Slab Area 1500-5000 (Cluster 2)",
+                affected_objects=slab_cluster_2,
+                message=f"{len(slab_cluster_2)} panels - Standard Panel",
             )
         
-        if slab_massive:
+        if slab_cluster_3:
+            automate_context.attach_info_to_objects(
+                category="Slab Area 5000-12500 (Cluster 3)",
+                affected_objects=slab_cluster_3,
+                message=f"{len(slab_cluster_3)} panels - Medium Panel",
+            )
+        
+        if slab_cluster_4:
             automate_context.attach_warning_to_objects(
-                category="Slab Area > 150m² (Large)",
-                affected_objects=slab_massive,
-                message=f"{len(slab_massive)} panels - Large Surface Area - Review for Expansion Joints or Phased Pouring",
+                category="Slab Area 12500-25000 (Cluster 4)",
+                affected_objects=slab_cluster_4,
+                message=f"{len(slab_cluster_4)} panels - Large Panel",
             )
         
-        total_slabs = len(slab_small) + len(slab_medium) + len(slab_massive)
+        if slab_cluster_5:
+            automate_context.attach_error_to_objects(
+                category="Slab Area >= 25000 (Cluster 5)",
+                affected_objects=slab_cluster_5,
+                message=f"{len(slab_cluster_5)} panels - Extra Large Panel - Review Required",
+            )
+        
+        total_slabs = (
+            len(slab_cluster_1) + len(slab_cluster_2) + len(slab_cluster_3) +
+            len(slab_cluster_4) + len(slab_cluster_5)
+        )
 
         # ═══════════════════════════════════════════════════════════════════════
-        # 4. MASSIVE VOLUME FLAG (NEW)
+        # 4. HIGH VOLUME ELEMENTS FLAG
         # ═══════════════════════════════════════════════════════════════════════
         high_volume_elements: List[Base] = []
         
         for obj in all_objects:
-            volume = get_volume(obj)
+            # Check any of the volume properties
+            volume = (
+                get_floor_slab_volume(obj) or
+                get_cables_volume(obj) or
+                get_truss_belt_volume(obj)
+            )
             if volume is not None and volume > HIGH_VOLUME_THRESHOLD:
                 high_volume_elements.append(obj)
         
@@ -582,7 +664,8 @@ def automate_function(
         if total_slabs > 0:
             summary_parts.append(
                 f"Slab Area Heatmap: {total_slabs} panels "
-                f"(Small={len(slab_small)}, Medium={len(slab_medium)}, Large={len(slab_massive)})"
+                f"(C1={len(slab_cluster_1)}, C2={len(slab_cluster_2)}, C3={len(slab_cluster_3)}, "
+                f"C4={len(slab_cluster_4)}, C5={len(slab_cluster_5)})"
             )
         else:
             # Debug: show what collections were found
