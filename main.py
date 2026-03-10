@@ -20,7 +20,7 @@ from speckle_automate import (
     execute_automate_function,
 )
 
-from flatten import flatten_base
+from flatten import flatten_base, flatten_base_with_collection
 
 
 class FunctionInputs(AutomateBase):
@@ -250,21 +250,20 @@ def categorize_element(obj: Base) -> str:
     return "Other"
 
 
-def extract_element_data(obj: Base) -> Dict[str, Any]:
-    """Extract all available structural properties from an element."""
+def extract_element_data(obj: Base, collection_name: Optional[str] = None) -> Dict[str, Any]:
+    """Extract Grasshopper-specific properties from an element.
+    
+    Only includes properties that come from the Grasshopper workflow:
+    - name, Pipe_Radius, Pipe_Lenght (typo preserved), area, volume
+    """
     return {
         "id": getattr(obj, "id", None),
+        "collection": collection_name,
         "name": get_name(obj),
-        "speckle_type": getattr(obj, "speckle_type", None),
-        "category": categorize_element(obj),
+        "Pipe_Radius": get_pipe_radius(obj),
+        "Pipe_Lenght": get_length(obj),  # Note: typo preserved from Grasshopper
         "area": get_area(obj),
         "volume": get_volume(obj),
-        "thickness": get_thickness(obj),
-        "length": get_length(obj),
-        "height": get_height(obj),
-        "weight": get_weight(obj),
-        "material": get_material(obj),
-        "pipe_radius": get_pipe_radius(obj),
     }
 
 
@@ -276,7 +275,7 @@ def generate_reports(
     all_elements_data: List[Dict[str, Any]],
     automate_context: AutomationContext
 ) -> int:
-    """Generate CSV and Excel reports for all structural categories.
+    """Generate CSV and Excel reports with Grasshopper data.
     
     Args:
         all_elements_data: List of element data dictionaries.
@@ -294,35 +293,31 @@ def generate_reports(
     if df_all.empty:
         return 0
     
-    # Group by category
-    categories = df_all["category"].unique()
-    category_dfs: Dict[str, pd.DataFrame] = {}
+    # Group by collection
+    collections = df_all["collection"].dropna().unique()
+    collection_dfs: Dict[str, pd.DataFrame] = {}
     
-    for category in categories:
-        df_category = df_all[df_all["category"] == category].copy()
+    for collection in collections:
+        df_collection = df_all[df_all["collection"] == collection].copy()
         
-        # Add summary statistics
+        # Calculate summary statistics
         summary_row = {
             "id": "SUMMARY",
-            "name": f"Total {category} Elements",
-            "speckle_type": "",
-            "category": category,
-            "area": df_category["area"].sum() if "area" in df_category else None,
-            "volume": df_category["volume"].sum() if "volume" in df_category else None,
-            "thickness": None,
-            "length": df_category["length"].sum() if "length" in df_category else None,
-            "height": None,
-            "weight": df_category["weight"].sum() if "weight" in df_category else None,
-            "material": f"Count: {len(df_category)}",
-            "pipe_radius": None,
+            "collection": collection,
+            "name": f"Total Elements: {len(df_collection)}",
+            "Pipe_Radius": None,
+            "Pipe_Lenght": df_collection["Pipe_Lenght"].sum() if "Pipe_Lenght" in df_collection else None,
+            "area": df_collection["area"].sum() if "area" in df_collection else None,
+            "volume": df_collection["volume"].sum() if "volume" in df_collection else None,
         }
         
         # Append summary row
-        df_with_summary = pd.concat([df_category, pd.DataFrame([summary_row])], ignore_index=True)
-        category_dfs[category] = df_with_summary
+        df_with_summary = pd.concat([df_collection, pd.DataFrame([summary_row])], ignore_index=True)
+        collection_dfs[collection] = df_with_summary
         
-        # Generate individual CSV
-        csv_filename = f"Structural_Data_{category}.csv"
+        # Generate individual CSV per collection
+        safe_name = "".join(c if c.isalnum() or c in " _-" else "_" for c in collection)
+        csv_filename = f"Structural_Data_{safe_name}.csv"
         csv_path = os.path.join(temp_dir, csv_filename)
         df_with_summary.to_csv(csv_path, index=False)
         
@@ -332,6 +327,15 @@ def generate_reports(
         except Exception:
             pass
     
+    # Also save all data combined
+    all_csv_path = os.path.join(temp_dir, "Structural_Data_All_Elements.csv")
+    df_all.to_csv(all_csv_path, index=False)
+    try:
+        automate_context.store_file_result(all_csv_path)
+        files_generated += 1
+    except Exception:
+        pass
+    
     # Generate Master Excel with multiple sheets
     excel_path = os.path.join(temp_dir, "Structural_Master_Report.xlsx")
     
@@ -339,13 +343,15 @@ def generate_reports(
         with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
             # Summary sheet
             summary_data = []
-            for category, df in category_dfs.items():
+            for collection, df in collection_dfs.items():
                 element_count = len(df) - 1  # Exclude summary row
                 total_area = df["area"].iloc[:-1].sum() if "area" in df else 0
                 total_volume = df["volume"].iloc[:-1].sum() if "volume" in df else 0
+                total_length = df["Pipe_Lenght"].iloc[:-1].sum() if "Pipe_Lenght" in df else 0
                 summary_data.append({
-                    "Category": category,
+                    "Collection": collection,
                     "Element Count": element_count,
+                    "Total Pipe Length (m)": round(total_length, 2) if pd.notna(total_length) else 0,
                     "Total Area (m²)": round(total_area, 2) if pd.notna(total_area) else 0,
                     "Total Volume (m³)": round(total_volume, 2) if pd.notna(total_volume) else 0,
                 })
@@ -353,11 +359,14 @@ def generate_reports(
             df_summary = pd.DataFrame(summary_data)
             df_summary.to_excel(writer, sheet_name="Summary", index=False)
             
-            # Individual category sheets
-            for category, df in category_dfs.items():
+            # Individual collection sheets
+            for collection, df in collection_dfs.items():
                 # Truncate sheet name to 31 chars (Excel limit)
-                sheet_name = category[:31]
+                sheet_name = collection[:31]
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
+            
+            # All data sheet
+            df_all.to_excel(writer, sheet_name="All Elements", index=False)
         
         automate_context.store_file_result(excel_path)
         files_generated += 1
@@ -399,17 +408,20 @@ def automate_function(
     
     try:
         # ═══════════════════════════════════════════════════════════════════════
-        # 1. RECEIVE AND FLATTEN MODEL DATA
+        # 1. RECEIVE AND FLATTEN MODEL DATA (WITH COLLECTION TRACKING)
         # ═══════════════════════════════════════════════════════════════════════
         version_root_object = automate_context.receive_version()
-        all_objects = list(flatten_base(version_root_object))
         
-        # Extract data from all objects for reporting
+        # Get all objects with their collection names
+        all_objects_with_collection = list(flatten_base_with_collection(version_root_object))
+        all_objects = [obj for obj, _ in all_objects_with_collection]
+        
+        # Extract data from all objects for reporting (with collection info)
         all_elements_data: List[Dict[str, Any]] = []
-        for obj in all_objects:
-            data = extract_element_data(obj)
-            # Only include objects with at least some meaningful data
-            if any(v is not None for k, v in data.items() if k not in ["id", "category"]):
+        for obj, collection_name in all_objects_with_collection:
+            data = extract_element_data(obj, collection_name)
+            # Only include objects with at least some meaningful Grasshopper data
+            if any(v is not None for k, v in data.items() if k not in ["id", "collection"]):
                 all_elements_data.append(data)
         
         # ═══════════════════════════════════════════════════════════════════════
@@ -476,14 +488,16 @@ def automate_function(
         )
 
         # ═══════════════════════════════════════════════════════════════════════
-        # 3. SLAB PANEL AREA HEATMAP (NEW)
+        # 3. SLAB PANEL AREA HEATMAP (ONLY "Floor slabs" COLLECTION)
         # ═══════════════════════════════════════════════════════════════════════
         slabs_with_area: List[Tuple[Base, float]] = []
         
-        for obj in all_objects:
-            area = get_area(obj)
-            if area is not None and area > 0:
-                slabs_with_area.append((obj, area))
+        # Filter to only objects from "Floor slabs" collection
+        for obj, collection_name in all_objects_with_collection:
+            if collection_name and "Floor slabs" in collection_name:
+                area = get_area(obj)
+                if area is not None and area > 0:
+                    slabs_with_area.append((obj, area))
         
         # Initialize slab clusters
         slab_small: List[Base] = []   # area < 50
