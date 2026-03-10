@@ -492,9 +492,15 @@ def automate_function(
         # ═══════════════════════════════════════════════════════════════════════
         slabs_with_area: List[Tuple[Base, float]] = []
         
-        # Filter to only objects from "Floor slabs" collection
+        # Debug: collect unique collection names
+        collection_names_found = set()
+        for _, coll_name in all_objects_with_collection:
+            if coll_name:
+                collection_names_found.add(coll_name)
+        
+        # Filter to only objects from "Floor slabs" collection (case-insensitive)
         for obj, collection_name in all_objects_with_collection:
-            if collection_name and "Floor slabs" in collection_name:
+            if collection_name and "floor" in collection_name.lower() and "slab" in collection_name.lower():
                 area = get_area(obj)
                 if area is not None and area > 0:
                     slabs_with_area.append((obj, area))
@@ -578,6 +584,12 @@ def automate_function(
                 f"Slab Area Heatmap: {total_slabs} panels "
                 f"(Small={len(slab_small)}, Medium={len(slab_medium)}, Large={len(slab_massive)})"
             )
+        else:
+            # Debug: show what collections were found
+            if collection_names_found:
+                summary_parts.append(f"Collections found: {list(collection_names_found)[:5]}")
+            else:
+                summary_parts.append("No collections detected")
         
         if high_volume_elements:
             summary_parts.append(f"High Volume Flags: {len(high_volume_elements)} elements")

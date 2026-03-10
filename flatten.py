@@ -118,14 +118,22 @@ def flatten_base_with_collection(
     current_name = getattr(base, "name", None)
     speckle_type = getattr(base, "speckle_type", "") or ""
     
-    # Determine if this is a collection
+    # Determine if this is a collection/container
+    # Be more flexible for Grasshopper data structures
+    has_name = current_name is not None and current_name != ""
+    has_elements = hasattr(base, "elements") or hasattr(base, "@elements")
+    has_objects = hasattr(base, "objects") or hasattr(base, "@objects")
+    has_children = hasattr(base, "children") or hasattr(base, "@children")
+    
     is_collection = (
         "Collection" in speckle_type or 
-        (current_name and hasattr(base, "elements"))
+        "DataTree" in speckle_type or
+        "Grasshopper" in speckle_type or
+        (has_name and (has_elements or has_objects or has_children))
     )
     
     # Update collection name if this is a collection
-    if is_collection and current_name:
+    if is_collection and has_name:
         collection_name = current_name
     
     # Yield the current object with its collection
