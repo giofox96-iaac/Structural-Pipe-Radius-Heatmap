@@ -947,8 +947,6 @@ def automate_function(
         critical_pipe_issue_id = None
         critical_pipe_issue_debug = None
         critical_pipe_issue_url = None
-        critical_pipe_issue_metadata_debug = None
-        critical_pipe_discussions_url = None
         if cluster_4_massive:
             try:
                 critical_pipe_issue_id, critical_pipe_issue_debug = create_issue_for_critical_pipes(
@@ -964,27 +962,10 @@ def automate_function(
                         critical_pipe_issue_url = (
                             f"{server_url}/projects/{project_id}/threads/{critical_pipe_issue_id}"
                         )
-                        critical_pipe_discussions_url = f"{server_url}/projects/{project_id}/discussions"
-                    try:
-                        metadata_ok, metadata_info = apply_issue_metadata_defaults(
-                            client=automate_context.speckle_client,
-                            project_id=automate_context.automation_run_data.project_id,
-                            thread_or_issue_id=critical_pipe_issue_id,
-                        )
-                        if metadata_ok:
-                            critical_pipe_issue_metadata_debug = f"metadata_applied={metadata_info}"
-                        else:
-                            critical_pipe_issue_metadata_debug = f"metadata_failed={metadata_info}"
-                    except Exception as metadata_exc:
-                        critical_pipe_issue_metadata_debug = (
-                            f"metadata_failed=unexpected: {str(metadata_exc)}"
-                        )
             except Exception:
                 critical_pipe_issue_id = None
                 critical_pipe_issue_debug = "Unexpected exception while creating critical pipe issue"
                 critical_pipe_issue_url = None
-                critical_pipe_discussions_url = None
-                critical_pipe_issue_metadata_debug = None
 
         total_pipes = (
             len(cluster_1_optimal)
@@ -1089,12 +1070,6 @@ def automate_function(
             issue_summary = f"Issue created: thread_id={critical_pipe_issue_id}"
             if critical_pipe_issue_url:
                 issue_summary += f", url={critical_pipe_issue_url}"
-            if critical_pipe_discussions_url:
-                issue_summary += f", discussions_url={critical_pipe_discussions_url}"
-            if critical_pipe_issue_debug:
-                issue_summary += f", source={critical_pipe_issue_debug}"
-            if critical_pipe_issue_metadata_debug:
-                issue_summary += f", {critical_pipe_issue_metadata_debug}"
             summary_parts.append(issue_summary)
         elif cluster_4_massive and critical_pipe_issue_debug:
             summary_parts.append(f"Issue creation failed: {critical_pipe_issue_debug[:220]}")
@@ -1109,8 +1084,9 @@ def automate_function(
         if total_slabs > 0:
             summary_parts.append(
                 f"Slab Area Heatmap: {total_slabs} slabs "
-                f"(C1={len(slab_cluster_1)}, C2={len(slab_cluster_2)}, C3={len(slab_cluster_3)}, "
-                f"C4={len(slab_cluster_4)}, C5={len(slab_cluster_5)})"
+                f"(Small={len(slab_cluster_1)}, Standard={len(slab_cluster_2)}, "
+                f"Medium={len(slab_cluster_3)}, Large={len(slab_cluster_4)}, "
+                f"Critical={len(slab_cluster_5)})"
             )
         else:
             # Debug: show what collections were found
