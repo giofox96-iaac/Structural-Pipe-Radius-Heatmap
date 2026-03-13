@@ -771,15 +771,24 @@ def automate_function(
 
         critical_pipe_issue_id = None
         critical_pipe_issue_debug = None
+        critical_pipe_issue_url = None
         if cluster_4_massive:
             try:
                 critical_pipe_issue_id, critical_pipe_issue_debug = create_issue_for_critical_pipes(
                     automate_context,
                     cluster_4_massive,
                 )
+                if critical_pipe_issue_id:
+                    server_url = (automate_context.automation_run_data.speckle_server_url or "").rstrip("/")
+                    project_id = automate_context.automation_run_data.project_id
+                    if server_url and project_id:
+                        critical_pipe_issue_url = (
+                            f"{server_url}/projects/{project_id}/threads/{critical_pipe_issue_id}"
+                        )
             except Exception:
                 critical_pipe_issue_id = None
                 critical_pipe_issue_debug = "Unexpected exception while creating critical pipe issue"
+                critical_pipe_issue_url = None
 
         total_pipes = (
             len(cluster_1_optimal)
@@ -879,6 +888,16 @@ def automate_function(
 
         # Build comprehensive summary
         summary_parts = []
+
+        if critical_pipe_issue_id:
+            issue_summary = f"Issue created: thread_id={critical_pipe_issue_id}"
+            if critical_pipe_issue_url:
+                issue_summary += f", url={critical_pipe_issue_url}"
+            if critical_pipe_issue_debug:
+                issue_summary += f", source={critical_pipe_issue_debug}"
+            summary_parts.append(issue_summary)
+        elif cluster_4_massive and critical_pipe_issue_debug:
+            summary_parts.append(f"Issue creation failed: {critical_pipe_issue_debug[:220]}")
         
         if total_pipes > 0:
             summary_parts.append(
@@ -886,10 +905,6 @@ def automate_function(
                 f"(Optimal={len(cluster_1_optimal)}, Standard={len(cluster_2_standard)}, "
                 f"Heavy={len(cluster_3_heavy)}, Critical={len(cluster_4_massive)})"
             )
-        if critical_pipe_issue_id:
-            summary_parts.append("Critical pipe issue created")
-        elif cluster_4_massive and critical_pipe_issue_debug:
-            summary_parts.append(f"Critical pipe issue failed: {critical_pipe_issue_debug[:180]}")
         
         if total_slabs > 0:
             summary_parts.append(
