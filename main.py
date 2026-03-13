@@ -12,7 +12,6 @@ import tempfile
 from typing import List, Optional, Tuple, Dict, Any
 
 import pandas as pd
-from gql import gql
 from specklepy.objects import Base
 from speckle_automate import (
     AutomateBase,
@@ -323,198 +322,140 @@ def extract_element_data(obj: Base, collection_name: Optional[str] = None) -> Di
     }
 
 
-def build_issue_description_doc(paragraphs: List[str]) -> Dict[str, Any]:
-    """Build a simple rich-text document for issue descriptions."""
-    content = []
-    for paragraph in paragraphs:
-        text = paragraph.strip()
-        if not text:
-            continue
-        content.append(
-            {
-                "type": "paragraph",
-                "content": [{"type": "text", "text": text}],
-            }
-        )
-
-    return {"type": "doc", "content": content}
+def _gql_escape_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "")
 
 
-def build_resource_id_string(objects: List[Base]) -> Optional[str]:
-    """Build a Speckle resourceIdString from object ids."""
-    object_ids = sorted(
-        {
-            str(getattr(obj, "id", "")).lower()
-            for obj in objects
-            if getattr(obj, "id", None)
-        }
-    )
-    return ",".join(object_ids) if object_ids else None
+def _to_gql_literal(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return f'"{_gql_escape_string(value)}"'
+    if isinstance(value, list):
+        return "[" + ", ".join(_to_gql_literal(v) for v in value) + "]"
+    if isinstance(value, dict):
+        return "{ " + ", ".join(f"{k}: {_to_gql_literal(v)}" for k, v in value.items()) + " }"
+    return f'"{_gql_escape_string(str(value))}"'
 
 
-def find_user_id_by_name(
-    automate_context: AutomationContext,
-    full_name: str,
+def create_speckle_issue(
+    client: Any,
+    project_id: str,
+    object_id: str,
+    x: float,
+    y: float,
+    z: float,
+    message_text: str,
 ) -> Optional[str]:
-    """Find a Speckle user id by display name."""
+    """Create a Speckle issue/comment thread via GraphQL commentCreate mutation.
+
+    Best resources:
+    - Speckle GraphQL API Explorer (accessible at /graphql on the Speckle server)
+    - Speckle Community Forum discussions on "Automating Comments via GraphQL"
+    """
+    viewer_state = {
+        "projectId": project_id,
+        "sessionId": "automate-session",
+        "viewer": {"metadata": {"filteringState": None}},
+        "resources": {
+            "request": {
+                "resourceIdString": object_id.lower(),
+                "threadFilters": {"includeArchived": False, "loadedVersionsOnly": False},
+            }
+        },
+        "ui": {
+            "threads": {"openThread": {"threadId": None, "isTyping": False, "newThreadEditor": True}},
+            "diff": {"command": None, "time": 0, "mode": 0},
+            "spotlightUserSessionId": None,
+            "camera": {
+                "position": [x + 25.0, y + 25.0, z + 25.0],
+                "target": [x, y, z],
+                "isOrthoProjection": False,
+                "zoom": 1,
+            },
+            "selection": [object_id.lower()],
+            "filters": {"isolatedObjectIds": [object_id.lower()], "hiddenObjectIds": []},
+            "lightConfig": None,
+            "sectionBox": None,
+        },
+    }
+    input_payload = {
+        "projectId": project_id,
+        "resourceIdString": object_id.lower(),
+        "content": {
+            "doc": {
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [{"type": "text", "text": message_text}],
+                    }
+                ],
+            },
+            "blobIds": [],
+        },
+        "viewerState": viewer_state,
+    }
+    input_literal = _to_gql_literal(input_payload)
+    mutation = f"""
+    mutation CreateAutomatedComment {{
+      commentMutations {{
+        create(input: {input_literal}) {{
+          id
+          rawText
+        }}
+      }}
+    }}
+    """
+
     try:
-        results = automate_context.speckle_client.other_user.user_search(full_name, limit=10)
+        result = client.execute_query(mutation)
+        created = ((result or {}).get("commentMutations") or {}).get("create")
+        if created:
+            return created.get("id")
     except Exception:
         return None
 
-    target = full_name.strip().lower()
-    exact_match = None
-
-    for user in results.items:
-        user_name = (getattr(user, "name", None) or "").strip()
-        if user_name.lower() == target:
-            exact_match = user
-            break
-
-    if exact_match:
-        return getattr(exact_match, "id", None)
-
-    for user in results.items:
-        user_name = (getattr(user, "name", None) or "").strip().lower()
-        if target in user_name:
-            return getattr(user, "id", None)
-
     return None
-
-
-def get_or_create_issue_label_id(
-    automate_context: AutomationContext,
-    project_id: str,
-    label_name: str,
-    hex_color: str = "#dc2626",
-) -> Optional[str]:
-    """Get an existing workspace issue label id or create it if missing."""
-    client = automate_context.speckle_client
-
-    lookup_query = gql(
-        """
-        query GetProjectIssueLabels($projectId: String!, $search: String!) {
-          project(id: $projectId) {
-            id
-            workspace {
-              id
-            }
-            issueLabels(input: { search: $search, limit: 25 }) {
-              items {
-                id
-                name
-              }
-            }
-          }
-        }
-        """
-    )
-    lookup_result = client.httpclient.execute(
-        lookup_query,
-        variable_values={"projectId": project_id, "search": label_name},
-    )
-
-    project = lookup_result.get("project") or {}
-    workspace = project.get("workspace") or {}
-    labels = ((project.get("issueLabels") or {}).get("items") or [])
-    target = label_name.strip().lower()
-
-    for label in labels:
-        if (label.get("name") or "").strip().lower() == target:
-            return label.get("id")
-
-    workspace_id = workspace.get("id")
-    if not workspace_id:
-        return None
-
-    create_query = gql(
-        """
-        mutation CreateWorkspaceIssueLabel($input: CreateIssueLabelInput!) {
-          workspaceMutations {
-            issueLabels {
-              createIssueLabel(input: $input) {
-                id
-                name
-              }
-            }
-          }
-        }
-        """
-    )
-    create_result = client.httpclient.execute(
-        create_query,
-        variable_values={
-            "input": {
-                "workspaceId": workspace_id,
-                "name": label_name,
-                "hexColor": hex_color,
-            }
-        },
-    )
-
-    created = (((create_result.get("workspaceMutations") or {}).get("issueLabels") or {}).get("createIssueLabel") or {})
-    return created.get("id")
 
 
 def create_issue_for_critical_pipes(
     automate_context: AutomationContext,
     critical_pipes: List[Base],
 ) -> Optional[str]:
-    """Create a Speckle issue for the critical pipe radius group."""
+    """Create one automated issue/comment for the critical pipe group."""
     if not critical_pipes:
         return None
 
-    project_id = automate_context.automation_run_data.project_id
-    resource_id_string = build_resource_id_string(critical_pipes)
-    if not resource_id_string:
+    target_object = None
+    for obj in critical_pipes:
+        obj_id = getattr(obj, "id", None)
+        if obj_id:
+            target_object = str(obj_id)
+            break
+
+    if not target_object:
         return None
 
-    assignee_id = find_user_id_by_name(automate_context, "Shuai Zhang")
-    label_id = get_or_create_issue_label_id(automate_context, project_id, "safety")
-
-    description = build_issue_description_doc(
-        [
-            f"This model submission contains {len(critical_pipes)} pipe elements with Pipe_Radius greater than or equal to 1.25 m, which places them in the critical review band.",
-            "Please review whether the current pipe sizing is structurally justified at the affected locations, with particular attention to local stiffness concentration, joint demand, constructability, and fabrication implications.",
-            "Provide a structural opinion on whether these members should be accepted as designed, optimized, or redesigned before coordination progresses further.",
-        ]
+    message_text = (
+        f"@Shuai Zhang - Structural review required: {len(critical_pipes)} pipes are in critical "
+        "radius range (>= 1.25m). Please assess sizing, stiffness concentration, and constructability. "
+        "#safety"
     )
 
-    mutation = gql(
-        """
-        mutation CreateCriticalPipeIssue($input: CreateIssueInput!) {
-          projectMutations {
-            issues {
-              createIssue(input: $input) {
-                id
-                title
-              }
-            }
-          }
-        }
-        """
+    return create_speckle_issue(
+        client=automate_context.speckle_client,
+        project_id=automate_context.automation_run_data.project_id,
+        object_id=target_object,
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        message_text=message_text,
     )
-    variables: Dict[str, Any] = {
-        "input": {
-            "projectId": project_id,
-            "title": "Critical pipe radius review required",
-            "description": description,
-            "priority": "high",
-            "status": "open",
-            "resourceIdString": resource_id_string,
-        }
-    }
-    if assignee_id:
-        variables["input"]["assigneeId"] = assignee_id
-    if label_id:
-        variables["input"]["labelIds"] = [label_id]
-
-    result = automate_context.speckle_client.httpclient.execute(
-        mutation,
-        variable_values=variables,
-    )
-    issue = (((result.get("projectMutations") or {}).get("issues") or {}).get("createIssue") or {})
-    return issue.get("id")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
