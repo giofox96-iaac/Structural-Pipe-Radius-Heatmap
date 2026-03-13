@@ -10,6 +10,7 @@ It also generates CSV/Excel reports for all structural data.
 import os
 import tempfile
 from typing import List, Optional, Tuple, Dict, Any
+from urllib.parse import urlsplit
 
 import pandas as pd
 from gql import gql
@@ -52,6 +53,26 @@ SLAB_CLUSTER_4_MAX = 25000.0   # Cluster 4: 12500 <= area < 25000
 # Default issue metadata targets
 ISSUE_ASSIGNEE_NAME = "Shuai"
 ISSUE_LABEL_NAME = "safety"
+
+
+def _normalize_frontend_server_url(raw_url: str) -> str:
+    """Return the frontend origin from a possibly API-scoped server URL."""
+    raw = (raw_url or "").strip().rstrip("/")
+    if not raw:
+        return ""
+
+    parsed = urlsplit(raw)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+    # Fallback for malformed/non-standard URL strings.
+    lowered = raw.lower()
+    for marker in ("/graphql", "/api"):
+        idx = lowered.find(marker)
+        if idx > 0:
+            return raw[:idx].rstrip("/")
+
+    return raw
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PROPERTY EXTRACTION HELPERS
@@ -636,7 +657,15 @@ def apply_issue_metadata_defaults(
                 except Exception as exc:
                         errors.append(f"{mutation_name}: {str(exc)}")
 
-        return False, "; ".join(errors)[:450] if errors else "metadata update returned no data"
+        # Structured issue metadata updates are not available on every deployment/schema.
+        # The thread message already includes @mention and #label signals.
+        fallback = (
+            "structured metadata API unavailable; "
+            "fallback=inline(@Shuai, PRIORITY:HIGH, #safety in thread text)"
+        )
+        if errors:
+            return True, f"{fallback}; diagnostics={'; '.join(errors)[:280]}"
+        return True, fallback
 
 
 def create_issue_for_critical_pipes(
@@ -690,6 +719,7 @@ def create_issue_for_critical_pipes(
         return None, f"Missing model/version ids (model_id={model_id}, version_id={version_id})"
 
     message_text = (
+        "[PRIORITY: HIGH] "
         f"@Shuai Zhang - Structural review required: {len(critical_pipes)} pipes are in critical "
         "radius range (>= 1.25m). Please assess sizing, stiffness concentration, and constructability. "
         "#safety"
@@ -918,6 +948,7 @@ def automate_function(
         critical_pipe_issue_debug = None
         critical_pipe_issue_url = None
         critical_pipe_issue_metadata_debug = None
+        critical_pipe_discussions_url = None
         if cluster_4_massive:
             try:
                 critical_pipe_issue_id, critical_pipe_issue_debug = create_issue_for_critical_pipes(
@@ -925,12 +956,15 @@ def automate_function(
                     cluster_4_massive,
                 )
                 if critical_pipe_issue_id:
-                    server_url = (automate_context.automation_run_data.speckle_server_url or "").rstrip("/")
+                    server_url = _normalize_frontend_server_url(
+                        automate_context.automation_run_data.speckle_server_url or ""
+                    )
                     project_id = automate_context.automation_run_data.project_id
                     if server_url and project_id:
                         critical_pipe_issue_url = (
                             f"{server_url}/projects/{project_id}/threads/{critical_pipe_issue_id}"
                         )
+                        critical_pipe_discussions_url = f"{server_url}/projects/{project_id}/discussions"
                     try:
                         metadata_ok, metadata_info = apply_issue_metadata_defaults(
                             client=automate_context.speckle_client,
@@ -949,6 +983,7 @@ def automate_function(
                 critical_pipe_issue_id = None
                 critical_pipe_issue_debug = "Unexpected exception while creating critical pipe issue"
                 critical_pipe_issue_url = None
+                critical_pipe_discussions_url = None
                 critical_pipe_issue_metadata_debug = None
 
         total_pipes = (
@@ -1054,6 +1089,8 @@ def automate_function(
             issue_summary = f"Issue created: thread_id={critical_pipe_issue_id}"
             if critical_pipe_issue_url:
                 issue_summary += f", url={critical_pipe_issue_url}"
+            if critical_pipe_discussions_url:
+                issue_summary += f", discussions_url={critical_pipe_discussions_url}"
             if critical_pipe_issue_debug:
                 issue_summary += f", source={critical_pipe_issue_debug}"
             if critical_pipe_issue_metadata_debug:
