@@ -322,29 +322,10 @@ def extract_element_data(obj: Base, collection_name: Optional[str] = None) -> Di
     }
 
 
-def _gql_escape_string(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "")
-
-
-def _to_gql_literal(value: Any) -> str:
-    if value is None:
-        return "null"
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return str(value)
-    if isinstance(value, str):
-        return f'"{_gql_escape_string(value)}"'
-    if isinstance(value, list):
-        return "[" + ", ".join(_to_gql_literal(v) for v in value) + "]"
-    if isinstance(value, dict):
-        return "{ " + ", ".join(f"{k}: {_to_gql_literal(v)}" for k, v in value.items()) + " }"
-    return f'"{_gql_escape_string(str(value))}"'
-
-
 def create_speckle_issue(
     client: Any,
     project_id: str,
+    model_id: str,
     object_id: str,
     x: float,
     y: float,
@@ -363,7 +344,7 @@ def create_speckle_issue(
         "viewer": {"metadata": {"filteringState": None}},
         "resources": {
             "request": {
-                "resourceIdString": object_id.lower(),
+                "resourceIdString": f"{model_id},{object_id.lower()}",
                 "threadFilters": {"includeArchived": False, "loadedVersionsOnly": False},
             }
         },
@@ -383,42 +364,83 @@ def create_speckle_issue(
             "sectionBox": None,
         },
     }
-    input_payload = {
-        "projectId": project_id,
-        "resourceIdString": object_id.lower(),
-        "content": {
-            "doc": {
-                "type": "doc",
-                "content": [
-                    {
-                        "type": "paragraph",
-                        "content": [{"type": "text", "text": message_text}],
-                    }
-                ],
-            },
-            "blobIds": [],
-        },
-        "viewerState": viewer_state,
+    # 1) Legacy schema path (Gemini suggestion): commentCreate(CommentCreateInput)
+    # Kept as first attempt because some Speckle deployments still expose this shape.
+    legacy_query = """
+    mutation commentCreate($input: CommentCreateInput!) {
+      commentCreate(input: $input) {
+        id
+      }
     }
-    input_literal = _to_gql_literal(input_payload)
-    mutation = f"""
-    mutation CreateAutomatedComment {{
-      commentMutations {{
-        create(input: {input_literal}) {{
+    """
+    legacy_variables = {
+        "input": {
+            "streamId": project_id,
+            "resources": [
+                {"resourceId": model_id, "resourceType": "commit"},
+                {"resourceId": object_id.lower(), "resourceType": "object"},
+            ],
+            "text": {
+                "doc": {
+                    "type": "doc",
+                    "content": [
+                        {
+                            "type": "paragraph",
+                            "content": [{"type": "text", "text": message_text}],
+                        }
+                    ],
+                }
+            },
+            "viewerState": viewer_state,
+        }
+    }
+
+    # 2) Current schema path: commentMutations.create(CreateCommentInput)
+    fallback_query = """
+    mutation CreateAutomatedComment($input: CreateCommentInput!) {
+      commentMutations {
+        create(input: $input) {
           id
           rawText
-        }}
-      }}
-    }}
+        }
+      }
+    }
     """
+    fallback_variables = {
+        "input": {
+            "projectId": project_id,
+            "resourceIdString": f"{model_id},{object_id.lower()}",
+            "content": {
+                "doc": {
+                    "type": "doc",
+                    "content": [
+                        {
+                            "type": "paragraph",
+                            "content": [{"type": "text", "text": message_text}],
+                        }
+                    ],
+                },
+                "blobIds": [],
+            },
+            "viewerState": viewer_state,
+        }
+    }
 
     try:
-        result = client.execute_query(mutation)
+        result = client.execute_query(legacy_query, legacy_variables)
+        created = (result or {}).get("commentCreate")
+        if created:
+            return created.get("id")
+    except Exception:
+        pass
+
+    try:
+        result = client.execute_query(fallback_query, fallback_variables)
         created = ((result or {}).get("commentMutations") or {}).get("create")
         if created:
             return created.get("id")
     except Exception:
-        return None
+        pass
 
     return None
 
@@ -441,6 +463,20 @@ def create_issue_for_critical_pipes(
     if not target_object:
         return None
 
+    run_data = automate_context.automation_run_data
+    model_id = getattr(run_data, "model_id", None)
+    if not model_id:
+        triggers = getattr(run_data, "triggers", None) or []
+        if triggers:
+            first_trigger = triggers[0]
+            if isinstance(first_trigger, dict):
+                model_id = first_trigger.get("modelId") or first_trigger.get("model_id")
+            else:
+                model_id = getattr(first_trigger, "model_id", None) or getattr(first_trigger, "modelId", None)
+
+    if not model_id:
+        return None
+
     message_text = (
         f"@Shuai Zhang - Structural review required: {len(critical_pipes)} pipes are in critical "
         "radius range (>= 1.25m). Please assess sizing, stiffness concentration, and constructability. "
@@ -450,6 +486,7 @@ def create_issue_for_critical_pipes(
     return create_speckle_issue(
         client=automate_context.speckle_client,
         project_id=automate_context.automation_run_data.project_id,
+        model_id=str(model_id),
         object_id=target_object,
         x=0.0,
         y=0.0,
