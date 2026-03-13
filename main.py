@@ -12,6 +12,7 @@ import tempfile
 from typing import List, Optional, Tuple, Dict, Any
 
 import pandas as pd
+from gql import gql
 from specklepy.objects import Base
 from speckle_automate import (
     AutomateBase,
@@ -322,6 +323,200 @@ def extract_element_data(obj: Base, collection_name: Optional[str] = None) -> Di
     }
 
 
+def build_issue_description_doc(paragraphs: List[str]) -> Dict[str, Any]:
+    """Build a simple rich-text document for issue descriptions."""
+    content = []
+    for paragraph in paragraphs:
+        text = paragraph.strip()
+        if not text:
+            continue
+        content.append(
+            {
+                "type": "paragraph",
+                "content": [{"type": "text", "text": text}],
+            }
+        )
+
+    return {"type": "doc", "content": content}
+
+
+def build_resource_id_string(objects: List[Base]) -> Optional[str]:
+    """Build a Speckle resourceIdString from object ids."""
+    object_ids = sorted(
+        {
+            str(getattr(obj, "id", "")).lower()
+            for obj in objects
+            if getattr(obj, "id", None)
+        }
+    )
+    return ",".join(object_ids) if object_ids else None
+
+
+def find_user_id_by_name(
+    automate_context: AutomationContext,
+    full_name: str,
+) -> Optional[str]:
+    """Find a Speckle user id by display name."""
+    try:
+        results = automate_context.speckle_client.other_user.user_search(full_name, limit=10)
+    except Exception:
+        return None
+
+    target = full_name.strip().lower()
+    exact_match = None
+
+    for user in results.items:
+        user_name = (getattr(user, "name", None) or "").strip()
+        if user_name.lower() == target:
+            exact_match = user
+            break
+
+    if exact_match:
+        return getattr(exact_match, "id", None)
+
+    for user in results.items:
+        user_name = (getattr(user, "name", None) or "").strip().lower()
+        if target in user_name:
+            return getattr(user, "id", None)
+
+    return None
+
+
+def get_or_create_issue_label_id(
+    automate_context: AutomationContext,
+    project_id: str,
+    label_name: str,
+    hex_color: str = "#dc2626",
+) -> Optional[str]:
+    """Get an existing workspace issue label id or create it if missing."""
+    client = automate_context.speckle_client
+
+    lookup_query = gql(
+        """
+        query GetProjectIssueLabels($projectId: String!, $search: String!) {
+          project(id: $projectId) {
+            id
+            workspace {
+              id
+            }
+            issueLabels(input: { search: $search, limit: 25 }) {
+              items {
+                id
+                name
+              }
+            }
+          }
+        }
+        """
+    )
+    lookup_result = client.httpclient.execute(
+        lookup_query,
+        variable_values={"projectId": project_id, "search": label_name},
+    )
+
+    project = lookup_result.get("project") or {}
+    workspace = project.get("workspace") or {}
+    labels = ((project.get("issueLabels") or {}).get("items") or [])
+    target = label_name.strip().lower()
+
+    for label in labels:
+        if (label.get("name") or "").strip().lower() == target:
+            return label.get("id")
+
+    workspace_id = workspace.get("id")
+    if not workspace_id:
+        return None
+
+    create_query = gql(
+        """
+        mutation CreateWorkspaceIssueLabel($input: CreateIssueLabelInput!) {
+          workspaceMutations {
+            issueLabels {
+              createIssueLabel(input: $input) {
+                id
+                name
+              }
+            }
+          }
+        }
+        """
+    )
+    create_result = client.httpclient.execute(
+        create_query,
+        variable_values={
+            "input": {
+                "workspaceId": workspace_id,
+                "name": label_name,
+                "hexColor": hex_color,
+            }
+        },
+    )
+
+    created = (((create_result.get("workspaceMutations") or {}).get("issueLabels") or {}).get("createIssueLabel") or {})
+    return created.get("id")
+
+
+def create_issue_for_critical_pipes(
+    automate_context: AutomationContext,
+    critical_pipes: List[Base],
+) -> Optional[str]:
+    """Create a Speckle issue for the critical pipe radius group."""
+    if not critical_pipes:
+        return None
+
+    project_id = automate_context.automation_run_data.project_id
+    resource_id_string = build_resource_id_string(critical_pipes)
+    if not resource_id_string:
+        return None
+
+    assignee_id = find_user_id_by_name(automate_context, "Shuai Zhang")
+    label_id = get_or_create_issue_label_id(automate_context, project_id, "safety")
+
+    description = build_issue_description_doc(
+        [
+            f"This model submission contains {len(critical_pipes)} pipe elements with Pipe_Radius greater than or equal to 1.25 m, which places them in the critical review band.",
+            "Please review whether the current pipe sizing is structurally justified at the affected locations, with particular attention to local stiffness concentration, joint demand, constructability, and fabrication implications.",
+            "Provide a structural opinion on whether these members should be accepted as designed, optimized, or redesigned before coordination progresses further.",
+        ]
+    )
+
+    mutation = gql(
+        """
+        mutation CreateCriticalPipeIssue($input: CreateIssueInput!) {
+          projectMutations {
+            issues {
+              createIssue(input: $input) {
+                id
+                title
+              }
+            }
+          }
+        }
+        """
+    )
+    variables: Dict[str, Any] = {
+        "input": {
+            "projectId": project_id,
+            "title": "Critical pipe radius review required",
+            "description": description,
+            "priority": "high",
+            "status": "open",
+            "resourceIdString": resource_id_string,
+        }
+    }
+    if assignee_id:
+        variables["input"]["assigneeId"] = assignee_id
+    if label_id:
+        variables["input"]["labelIds"] = [label_id]
+
+    result = automate_context.speckle_client.httpclient.execute(
+        mutation,
+        variable_values=variables,
+    )
+    issue = (((result.get("projectMutations") or {}).get("issues") or {}).get("createIssue") or {})
+    return issue.get("id")
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # REPORT GENERATION
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -526,6 +721,16 @@ def automate_function(
                 message=f"{len(cluster_4_massive)} pipes with massive/critical radius",
             )
 
+        critical_pipe_issue_id = None
+        if cluster_4_massive:
+            try:
+                critical_pipe_issue_id = create_issue_for_critical_pipes(
+                    automate_context,
+                    cluster_4_massive,
+                )
+            except Exception:
+                critical_pipe_issue_id = None
+
         total_pipes = (
             len(cluster_1_optimal)
             + len(cluster_2_standard)
@@ -631,6 +836,8 @@ def automate_function(
                 f"(Optimal={len(cluster_1_optimal)}, Standard={len(cluster_2_standard)}, "
                 f"Heavy={len(cluster_3_heavy)}, Critical={len(cluster_4_massive)})"
             )
+        if critical_pipe_issue_id:
+            summary_parts.append("Critical pipe issue created")
         
         if total_slabs > 0:
             summary_parts.append(
