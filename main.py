@@ -171,6 +171,25 @@ def _prepare_collection_report_df(df_collection: pd.DataFrame, collection_name: 
     return prepared
 
 
+def _make_excel_sheet_name(raw_name: str, used_names: set[str]) -> str:
+    """Sanitize and uniquify an Excel sheet name."""
+    invalid_chars = set('[]:*?/\\')
+    cleaned = "".join("_" if char in invalid_chars else char for char in (raw_name or "Sheet"))
+    cleaned = cleaned.strip().strip("'") or "Sheet"
+    cleaned = cleaned[:31]
+
+    candidate = cleaned
+    suffix = 1
+    while candidate in used_names or not candidate:
+        suffix_text = f"_{suffix}"
+        base = cleaned[: max(0, 31 - len(suffix_text))] or "Sheet"
+        candidate = f"{base}{suffix_text}"
+        suffix += 1
+
+    used_names.add(candidate)
+    return candidate
+
+
 def get_float_property(obj: Base, prop_names: List[str]) -> Optional[float]:
     """Extract a float property from an object."""
     value = get_property_value(obj, prop_names)
@@ -823,6 +842,7 @@ def generate_reports(
     
     try:
         with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
+            used_sheet_names: set[str] = set()
             # Summary sheet
             summary_data = []
             for collection, df in collection_dfs.items():
@@ -832,16 +852,23 @@ def generate_reports(
                 })
             
             df_summary = pd.DataFrame(summary_data)
-            df_summary.to_excel(writer, sheet_name="Summary", index=False)
+            df_summary.to_excel(
+                writer,
+                sheet_name=_make_excel_sheet_name("Summary", used_sheet_names),
+                index=False,
+            )
             
             # Individual collection sheets
             for collection, df in collection_dfs.items():
-                # Truncate sheet name to 31 chars (Excel limit)
-                sheet_name = collection[:31]
+                sheet_name = _make_excel_sheet_name(str(collection), used_sheet_names)
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
             
             # All data sheet
-            df_summary.to_excel(writer, sheet_name="All Elements", index=False)
+            df_summary.to_excel(
+                writer,
+                sheet_name=_make_excel_sheet_name("All Elements", used_sheet_names),
+                index=False,
+            )
         
         automate_context.store_file_result(excel_path)
         files_generated += 1
