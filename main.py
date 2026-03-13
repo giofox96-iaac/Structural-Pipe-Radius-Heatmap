@@ -322,6 +322,54 @@ def extract_element_data(obj: Base, collection_name: Optional[str] = None) -> Di
     }
 
 
+def get_object_center(obj: Base) -> Tuple[float, float, float]:
+    """Calculate an object's center from its first display mesh vertices."""
+    try:
+        display_value = getattr(obj, "displayValue", None)
+        if display_value is None:
+            try:
+                display_value = obj["displayValue"]
+            except (KeyError, TypeError):
+                pass
+
+        if display_value is None:
+            display_value = getattr(obj, "@displayValue", None)
+
+        mesh = None
+        if isinstance(display_value, list) and display_value:
+            mesh = display_value[0]
+        elif display_value is not None:
+            mesh = display_value
+
+        if mesh is None:
+            return (0.0, 0.0, 0.0)
+
+        vertices = getattr(mesh, "vertices", None)
+        if vertices is None:
+            try:
+                vertices = mesh["vertices"]
+            except (KeyError, TypeError):
+                return (0.0, 0.0, 0.0)
+
+        if not vertices or len(vertices) < 3:
+            return (0.0, 0.0, 0.0)
+
+        xs = vertices[0::3]
+        ys = vertices[1::3]
+        zs = vertices[2::3]
+
+        if not xs or not ys or not zs:
+            return (0.0, 0.0, 0.0)
+
+        return (
+            float(sum(xs) / len(xs)),
+            float(sum(ys) / len(ys)),
+            float(sum(zs) / len(zs)),
+        )
+    except Exception:
+        return (0.0, 0.0, 0.0)
+
+
 def create_speckle_issue(
     client: Any,
     project_id: str,
@@ -332,53 +380,44 @@ def create_speckle_issue(
     z: float,
     message_text: str,
 ) -> Optional[str]:
-    """Create a Speckle issue/comment thread via GraphQL commentCreate mutation.
-
-    Best resources:
-    - Speckle GraphQL API Explorer (accessible at /graphql on the Speckle server)
-    - Speckle Community Forum discussions on "Automating Comments via GraphQL"
+    """Create a Speckle issue/comment thread via GraphQL commentCreate mutation."""
+    query = """
+    mutation commentCreate($input: CommentCreateInput!) {
+        commentCreate(input: $input) {
+            id
+        }
+    }
     """
+
     viewer_state = {
         "projectId": project_id,
         "sessionId": "automate-session",
         "viewer": {"metadata": {"filteringState": None}},
         "resources": {
             "request": {
-                "resourceIdString": f"{model_id},{object_id.lower()}",
+                "resourceIdString": f"{model_id}@{object_id}",
                 "threadFilters": {"includeArchived": False, "loadedVersionsOnly": False},
             }
         },
         "ui": {
             "threads": {"openThread": {"threadId": None, "isTyping": False, "newThreadEditor": True}},
-            "diff": {"command": None, "time": 0, "mode": 0},
-            "spotlightUserSessionId": None,
             "camera": {
                 "position": [x + 25.0, y + 25.0, z + 25.0],
                 "target": [x, y, z],
                 "isOrthoProjection": False,
                 "zoom": 1,
             },
-            "selection": [object_id.lower()],
-            "filters": {"isolatedObjectIds": [object_id.lower()], "hiddenObjectIds": []},
-            "lightConfig": None,
-            "sectionBox": None,
+            "selection": [object_id],
+            "filters": {"isolatedObjectIds": [object_id], "hiddenObjectIds": []},
         },
     }
-    # 1) Legacy schema path (Gemini suggestion): commentCreate(CommentCreateInput)
-    # Kept as first attempt because some Speckle deployments still expose this shape.
-    legacy_query = """
-    mutation commentCreate($input: CommentCreateInput!) {
-      commentCreate(input: $input) {
-        id
-      }
-    }
-    """
-    legacy_variables = {
+
+    variables = {
         "input": {
             "streamId": project_id,
             "resources": [
                 {"resourceId": model_id, "resourceType": "commit"},
-                {"resourceId": object_id.lower(), "resourceType": "object"},
+                {"resourceId": object_id, "resourceType": "object"},
             ],
             "text": {
                 "doc": {
@@ -395,52 +434,14 @@ def create_speckle_issue(
         }
     }
 
-    # 2) Current schema path: commentMutations.create(CreateCommentInput)
-    fallback_query = """
-    mutation CreateAutomatedComment($input: CreateCommentInput!) {
-      commentMutations {
-        create(input: $input) {
-          id
-          rawText
-        }
-      }
-    }
-    """
-    fallback_variables = {
-        "input": {
-            "projectId": project_id,
-            "resourceIdString": f"{model_id},{object_id.lower()}",
-            "content": {
-                "doc": {
-                    "type": "doc",
-                    "content": [
-                        {
-                            "type": "paragraph",
-                            "content": [{"type": "text", "text": message_text}],
-                        }
-                    ],
-                },
-                "blobIds": [],
-            },
-            "viewerState": viewer_state,
-        }
-    }
-
     try:
-        result = client.execute_query(legacy_query, legacy_variables)
+        result = client.execute_query(query, variables)
         created = (result or {}).get("commentCreate")
         if created:
             return created.get("id")
-    except Exception:
-        pass
-
-    try:
-        result = client.execute_query(fallback_query, fallback_variables)
-        created = ((result or {}).get("commentMutations") or {}).get("create")
-        if created:
-            return created.get("id")
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"GraphQL Error during issue creation: {exc}")
+        return None
 
     return None
 
@@ -454,27 +455,39 @@ def create_issue_for_critical_pipes(
         return None
 
     target_object = None
+    target_object_base = None
     for obj in critical_pipes:
         obj_id = getattr(obj, "id", None)
         if obj_id:
             target_object = str(obj_id)
+            target_object_base = obj
             break
 
-    if not target_object:
+    if not target_object or target_object_base is None:
         return None
 
     run_data = automate_context.automation_run_data
-    model_id = getattr(run_data, "model_id", None)
-    if not model_id:
+    version_id = getattr(run_data, "version_id", None)
+    if not version_id:
         triggers = getattr(run_data, "triggers", None) or []
         if triggers:
             first_trigger = triggers[0]
             if isinstance(first_trigger, dict):
-                model_id = first_trigger.get("modelId") or first_trigger.get("model_id")
+                version_id = (
+                    first_trigger.get("versionId")
+                    or first_trigger.get("version_id")
+                    or first_trigger.get("commitId")
+                    or first_trigger.get("commit_id")
+                )
             else:
-                model_id = getattr(first_trigger, "model_id", None) or getattr(first_trigger, "modelId", None)
+                version_id = (
+                    getattr(first_trigger, "version_id", None)
+                    or getattr(first_trigger, "versionId", None)
+                    or getattr(first_trigger, "commit_id", None)
+                    or getattr(first_trigger, "commitId", None)
+                )
 
-    if not model_id:
+    if not version_id:
         return None
 
     message_text = (
@@ -483,14 +496,16 @@ def create_issue_for_critical_pipes(
         "#safety"
     )
 
+    center_x, center_y, center_z = get_object_center(target_object_base)
+
     return create_speckle_issue(
         client=automate_context.speckle_client,
         project_id=automate_context.automation_run_data.project_id,
-        model_id=str(model_id),
+        model_id=str(version_id),
         object_id=target_object,
-        x=0.0,
-        y=0.0,
-        z=0.0,
+        x=center_x,
+        y=center_y,
+        z=center_z,
         message_text=message_text,
     )
 
