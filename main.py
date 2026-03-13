@@ -79,9 +79,7 @@ def _normalize_frontend_server_url(raw_url: str) -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def get_property_value(obj: Base, prop_names: List[str]) -> Optional[Any]:
-    """Extract a property from an object, checking multiple possible locations.
-    
-    Handles Grasshopper data where properties are stored in nested 'properties' object.
+    """Extract a property only from Grasshopper property containers.
     
     Args:
         obj: A Speckle Base object.
@@ -118,12 +116,7 @@ def get_property_value(obj: Base, prop_names: List[str]) -> Optional[Any]:
         
         return None
     
-    # 1. Try direct property access on the object
-    result = try_get_value(obj, prop_names)
-    if result is not None:
-        return result
-    
-    # 2. Try nested in 'properties' (Grasshopper data structure)
+    # 1. Try nested in 'properties' (Grasshopper data structure)
     properties = getattr(obj, "properties", None)
     if properties is None:
         try:
@@ -135,19 +128,47 @@ def get_property_value(obj: Base, prop_names: List[str]) -> Optional[Any]:
     if result is not None:
         return result
     
-    # 3. Try nested in '@properties'
+    # 2. Try nested in '@properties'
     properties = getattr(obj, "@properties", None)
     result = try_get_value(properties, prop_names)
     if result is not None:
         return result
-    
-    # 4. Try nested in 'parameters' (Revit data)
-    parameters = getattr(obj, "parameters", None)
-    result = try_get_value(parameters, prop_names)
-    if result is not None:
-        return result
-    
+
     return None
+
+
+COMMON_REPORT_COLUMNS = ["collection", "Structural_Role", "Material", "Density (kg/m³)"]
+
+COLLECTION_SPECIFIC_COLUMNS = {
+    "pipes": ["Pipe_Lenght", "Pipe_Radius"],
+    "joints": ["Joint_Tipe"],
+    "floor slabs": ["Floor_Slab_Area", "Floor_Slab_Thickness", "Floor_Slab_Volume"],
+    "cores": ["Core_Height"],
+    "cables": ["Cables_Volume"],
+    "belt truss": ["Truss_Belt_Volume"],
+}
+
+
+def _get_collection_report_columns(collection_name: str) -> List[str]:
+    """Return the relevant report columns for a specific collection."""
+    collection_lower = (collection_name or "").strip().lower()
+    for key, specific_columns in COLLECTION_SPECIFIC_COLUMNS.items():
+        if key in collection_lower:
+            return COMMON_REPORT_COLUMNS + specific_columns
+    return COMMON_REPORT_COLUMNS
+
+
+def _prepare_collection_report_df(df_collection: pd.DataFrame, collection_name: str) -> pd.DataFrame:
+    """Keep only relevant collection columns and fill shared metadata from first non-null value."""
+    columns = [column for column in _get_collection_report_columns(collection_name) if column in df_collection.columns]
+    prepared = df_collection.loc[:, columns].copy()
+
+    for column in [c for c in COMMON_REPORT_COLUMNS if c in prepared.columns and c != "collection"]:
+        non_null_values = prepared[column].dropna()
+        if not non_null_values.empty:
+            prepared[column] = prepared[column].fillna(non_null_values.iloc[0])
+
+    return prepared
 
 
 def get_float_property(obj: Base, prop_names: List[str]) -> Optional[float]:
@@ -772,6 +793,7 @@ def generate_reports(
     
     for collection in collections:
         df_collection = df_all[df_all["collection"] == collection].copy()
+        df_collection = _prepare_collection_report_df(df_collection, str(collection))
         collection_dfs[collection] = df_collection
         
         # Generate individual CSV per collection
@@ -788,7 +810,8 @@ def generate_reports(
     
     # Also save all data combined
     all_csv_path = os.path.join(temp_dir, "Structural_Data_All_Elements.csv")
-    df_all.to_csv(all_csv_path, index=False)
+    df_all_minimal = df_all[[column for column in ["collection"] if column in df_all.columns]].copy()
+    df_all_minimal.to_csv(all_csv_path, index=False)
     try:
         automate_context.store_file_result(all_csv_path)
         files_generated += 1
@@ -803,22 +826,9 @@ def generate_reports(
             # Summary sheet
             summary_data = []
             for collection, df in collection_dfs.items():
-                element_count = len(df)
-                # Sum relevant columns based on what's available
-                total_pipe_length = df["Pipe_Lenght"].sum() if "Pipe_Lenght" in df.columns else 0
-                total_slab_area = df["Floor_Slab_Area"].sum() if "Floor_Slab_Area" in df.columns else 0
-                total_slab_volume = df["Floor_Slab_Volume"].sum() if "Floor_Slab_Volume" in df.columns else 0
-                total_cables_volume = df["Cables_Volume"].sum() if "Cables_Volume" in df.columns else 0
-                total_truss_volume = df["Truss_Belt_Volume"].sum() if "Truss_Belt_Volume" in df.columns else 0
-                
                 summary_data.append({
                     "Collection": collection,
-                    "Element Count": element_count,
-                    "Total Pipe_Lenght": round(total_pipe_length, 2) if pd.notna(total_pipe_length) else 0,
-                    "Total Floor_Slab_Area": round(total_slab_area, 2) if pd.notna(total_slab_area) else 0,
-                    "Total Floor_Slab_Volume": round(total_slab_volume, 2) if pd.notna(total_slab_volume) else 0,
-                    "Total Cables_Volume": round(total_cables_volume, 2) if pd.notna(total_cables_volume) else 0,
-                    "Total Truss_Belt_Volume": round(total_truss_volume, 2) if pd.notna(total_truss_volume) else 0,
+                    "Element Count": len(df),
                 })
             
             df_summary = pd.DataFrame(summary_data)
@@ -831,7 +841,7 @@ def generate_reports(
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
             
             # All data sheet
-            df_all.to_excel(writer, sheet_name="All Elements", index=False)
+            df_summary.to_excel(writer, sheet_name="All Elements", index=False)
         
         automate_context.store_file_result(excel_path)
         files_generated += 1
