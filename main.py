@@ -12,6 +12,7 @@ import tempfile
 from typing import List, Optional, Tuple, Dict, Any
 
 import pandas as pd
+from gql import gql
 from specklepy.objects import Base
 from speckle_automate import (
     AutomateBase,
@@ -374,20 +375,15 @@ def create_speckle_issue(
     client: Any,
     project_id: str,
     model_id: str,
+    version_id: str,
     object_id: str,
     x: float,
     y: float,
     z: float,
     message_text: str,
-) -> Optional[str]:
-    """Create a Speckle issue/comment thread via GraphQL commentCreate mutation."""
-    query = """
-    mutation commentCreate($input: CommentCreateInput!) {
-        commentCreate(input: $input) {
-            id
-        }
-    }
-    """
+) -> Tuple[Optional[str], Optional[str]]:
+    """Create a Speckle issue/comment thread via GraphQL mutations."""
+    resource_id_string = f"{str(model_id).lower()}@{str(version_id).lower()},{str(object_id).lower()}"
 
     viewer_state = {
         "projectId": project_id,
@@ -395,7 +391,7 @@ def create_speckle_issue(
         "viewer": {"metadata": {"filteringState": None}},
         "resources": {
             "request": {
-                "resourceIdString": f"{model_id}@{object_id}",
+                "resourceIdString": resource_id_string,
                 "threadFilters": {"includeArchived": False, "loadedVersionsOnly": False},
             }
         },
@@ -407,17 +403,56 @@ def create_speckle_issue(
                 "isOrthoProjection": False,
                 "zoom": 1,
             },
-            "selection": [object_id],
-            "filters": {"isolatedObjectIds": [object_id], "hiddenObjectIds": []},
+            "selection": [str(object_id).lower()],
+            "filters": {"isolatedObjectIds": [str(object_id).lower()], "hiddenObjectIds": []},
         },
     }
 
-    variables = {
+    modern_query = gql(
+        """
+        mutation CreateCommentThread($input: CreateCommentInput!) {
+          commentMutations {
+            create(input: $input) {
+              id
+              rawText
+            }
+          }
+        }
+        """
+    )
+    modern_variables = {
+        "input": {
+            "projectId": project_id,
+            "resourceIdString": resource_id_string,
+            "content": {
+                "doc": {
+                    "type": "doc",
+                    "content": [
+                        {
+                            "type": "paragraph",
+                            "content": [{"type": "text", "text": message_text}],
+                        }
+                    ],
+                },
+                "blobIds": [],
+            },
+            "viewerState": viewer_state,
+        }
+    }
+
+    legacy_query = gql(
+        """
+        mutation commentCreate($input: CommentCreateInput!) {
+          commentCreate(input: $input)
+        }
+        """
+    )
+    legacy_variables = {
         "input": {
             "streamId": project_id,
             "resources": [
-                {"resourceId": model_id, "resourceType": "commit"},
-                {"resourceId": object_id, "resourceType": "object"},
+                {"resourceId": str(version_id).lower(), "resourceType": "commit"},
+                {"resourceId": str(object_id).lower(), "resourceType": "object"},
             ],
             "text": {
                 "doc": {
@@ -435,24 +470,37 @@ def create_speckle_issue(
     }
 
     try:
-        result = client.execute_query(query, variables)
-        created = (result or {}).get("commentCreate")
+        result = client.httpclient.execute(modern_query, variable_values=modern_variables)
+        created = ((result or {}).get("commentMutations") or {}).get("create")
         if created:
-            return created.get("id")
+            return created.get("id"), "commentMutations.create"
     except Exception as exc:
-        print(f"GraphQL Error during issue creation: {exc}")
-        return None
+        modern_error = str(exc)
+    else:
+        modern_error = "commentMutations.create returned no data"
 
-    return None
+    try:
+        result = client.httpclient.execute(legacy_query, variable_values=legacy_variables)
+        created = (result or {}).get("commentCreate")
+        if isinstance(created, str) and created:
+            return created, "commentCreate"
+        if isinstance(created, dict) and created.get("id"):
+            return created.get("id"), "commentCreate"
+    except Exception as exc:
+        legacy_error = str(exc)
+    else:
+        legacy_error = "commentCreate returned no data"
+
+    return None, f"modern={modern_error}; legacy={legacy_error}; resourceIdString={resource_id_string}"
 
 
 def create_issue_for_critical_pipes(
     automate_context: AutomationContext,
     critical_pipes: List[Base],
-) -> Optional[str]:
+) -> Tuple[Optional[str], Optional[str]]:
     """Create one automated issue/comment for the critical pipe group."""
     if not critical_pipes:
-        return None
+        return None, "No critical pipes found"
 
     target_object = None
     target_object_base = None
@@ -464,31 +512,37 @@ def create_issue_for_critical_pipes(
             break
 
     if not target_object or target_object_base is None:
-        return None
+        return None, "No valid target object id found"
 
     run_data = automate_context.automation_run_data
+    model_id = getattr(run_data, "model_id", None)
     version_id = getattr(run_data, "version_id", None)
-    if not version_id:
+    if not model_id or not version_id:
         triggers = getattr(run_data, "triggers", None) or []
         if triggers:
             first_trigger = triggers[0]
+            payload = first_trigger.get("payload") if isinstance(first_trigger, dict) else getattr(first_trigger, "payload", None)
+            if payload is None:
+                payload = first_trigger
             if isinstance(first_trigger, dict):
-                version_id = (
-                    first_trigger.get("versionId")
-                    or first_trigger.get("version_id")
-                    or first_trigger.get("commitId")
-                    or first_trigger.get("commit_id")
+                model_id = model_id or payload.get("modelId") or payload.get("model_id")
+                version_id = version_id or (
+                    payload.get("versionId")
+                    or payload.get("version_id")
+                    or payload.get("commitId")
+                    or payload.get("commit_id")
                 )
             else:
-                version_id = (
-                    getattr(first_trigger, "version_id", None)
-                    or getattr(first_trigger, "versionId", None)
-                    or getattr(first_trigger, "commit_id", None)
-                    or getattr(first_trigger, "commitId", None)
+                model_id = model_id or getattr(payload, "model_id", None) or getattr(payload, "modelId", None)
+                version_id = version_id or (
+                    getattr(payload, "version_id", None)
+                    or getattr(payload, "versionId", None)
+                    or getattr(payload, "commit_id", None)
+                    or getattr(payload, "commitId", None)
                 )
 
-    if not version_id:
-        return None
+    if not model_id or not version_id:
+        return None, f"Missing model/version ids (model_id={model_id}, version_id={version_id})"
 
     message_text = (
         f"@Shuai Zhang - Structural review required: {len(critical_pipes)} pipes are in critical "
@@ -501,7 +555,8 @@ def create_issue_for_critical_pipes(
     return create_speckle_issue(
         client=automate_context.speckle_client,
         project_id=automate_context.automation_run_data.project_id,
-        model_id=str(version_id),
+        model_id=str(model_id),
+        version_id=str(version_id),
         object_id=target_object,
         x=center_x,
         y=center_y,
@@ -715,14 +770,16 @@ def automate_function(
             )
 
         critical_pipe_issue_id = None
+        critical_pipe_issue_debug = None
         if cluster_4_massive:
             try:
-                critical_pipe_issue_id = create_issue_for_critical_pipes(
+                critical_pipe_issue_id, critical_pipe_issue_debug = create_issue_for_critical_pipes(
                     automate_context,
                     cluster_4_massive,
                 )
             except Exception:
                 critical_pipe_issue_id = None
+                critical_pipe_issue_debug = "Unexpected exception while creating critical pipe issue"
 
         total_pipes = (
             len(cluster_1_optimal)
@@ -773,35 +830,35 @@ def automate_function(
             automate_context.attach_success_to_objects(
                 category="Slab Area < 1500 (Cluster 1)",
                 affected_objects=slab_cluster_1,
-                message=f"{len(slab_cluster_1)} panels - Small Panel",
+                message=f"{len(slab_cluster_1)} slabs - Small Slab",
             )
         
         if slab_cluster_2:
             automate_context.attach_info_to_objects(
                 category="Slab Area 1500-5000 (Cluster 2)",
                 affected_objects=slab_cluster_2,
-                message=f"{len(slab_cluster_2)} panels - Standard Panel",
+                message=f"{len(slab_cluster_2)} slabs - Standard Slab",
             )
         
         if slab_cluster_3:
             automate_context.attach_info_to_objects(
                 category="Slab Area 5000-12500 (Cluster 3)",
                 affected_objects=slab_cluster_3,
-                message=f"{len(slab_cluster_3)} panels - Medium Panel",
+                message=f"{len(slab_cluster_3)} slabs - Medium Slab",
             )
         
         if slab_cluster_4:
             automate_context.attach_warning_to_objects(
                 category="Slab Area 12500-25000 (Cluster 4)",
                 affected_objects=slab_cluster_4,
-                message=f"{len(slab_cluster_4)} panels - Large Panel",
+                message=f"{len(slab_cluster_4)} slabs - Large Slab",
             )
         
         if slab_cluster_5:
             automate_context.attach_error_to_objects(
                 category="Slab Area >= 25000 (Cluster 5)",
                 affected_objects=slab_cluster_5,
-                message=f"{len(slab_cluster_5)} panels - Extra Large Panel - Review Required",
+                message=f"{len(slab_cluster_5)} slabs - Extra Large Slab - Review Required",
             )
         
         total_slabs = (
@@ -831,10 +888,12 @@ def automate_function(
             )
         if critical_pipe_issue_id:
             summary_parts.append("Critical pipe issue created")
+        elif cluster_4_massive and critical_pipe_issue_debug:
+            summary_parts.append(f"Critical pipe issue failed: {critical_pipe_issue_debug[:180]}")
         
         if total_slabs > 0:
             summary_parts.append(
-                f"Slab Area Heatmap: {total_slabs} panels "
+                f"Slab Area Heatmap: {total_slabs} slabs "
                 f"(C1={len(slab_cluster_1)}, C2={len(slab_cluster_2)}, C3={len(slab_cluster_3)}, "
                 f"C4={len(slab_cluster_4)}, C5={len(slab_cluster_5)})"
             )
