@@ -49,6 +49,10 @@ SLAB_CLUSTER_3_MAX = 12500.0   # Cluster 3: 5000 <= area < 12500
 SLAB_CLUSTER_4_MAX = 25000.0   # Cluster 4: 12500 <= area < 25000
 # Cluster 5: area >= 25000
 
+# Default issue metadata targets
+ISSUE_ASSIGNEE_NAME = "Shuai"
+ISSUE_LABEL_NAME = "safety"
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # PROPERTY EXTRACTION HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -494,6 +498,147 @@ def create_speckle_issue(
     return None, f"modern={modern_error}; legacy={legacy_error}; resourceIdString={resource_id_string}"
 
 
+def _find_user_id_for_issue_assignment(
+        client: Any,
+        project_id: str,
+        user_query: str,
+) -> Tuple[Optional[str], Optional[str]]:
+        """Resolve a user id from a query string, scoped to the project collaborators when possible."""
+        users_query = gql(
+                """
+                query FindUsersForIssue($query: String!, $projectId: String) {
+                    users(input: { query: $query, limit: 10, projectId: $projectId }) {
+                        items {
+                            id
+                            name
+                        }
+                    }
+                }
+                """
+        )
+        variables = {"query": user_query, "projectId": project_id}
+
+        try:
+                result = client.httpclient.execute(users_query, variable_values=variables)
+        except Exception as exc:
+                return None, f"users lookup failed: {str(exc)}"
+
+        items = ((result or {}).get("users") or {}).get("items") or []
+        if not items:
+                return None, f"no users found for query '{user_query}'"
+
+        # Prefer exact-ish name match, then first result.
+        query_lower = user_query.lower()
+        for item in items:
+                name = str(item.get("name") or "").lower()
+                if query_lower in name:
+                        user_id = item.get("id")
+                        if user_id:
+                                return str(user_id), None
+
+        first_id = items[0].get("id")
+        if first_id:
+                return str(first_id), None
+
+        return None, "users lookup returned items without id"
+
+
+def apply_issue_metadata_defaults(
+        client: Any,
+        project_id: str,
+        thread_or_issue_id: str,
+) -> Tuple[bool, str]:
+        """Best-effort metadata update: assignee=Shuai, priority=high, label=safety.
+
+        This function tries multiple mutation shapes to accommodate server-version differences.
+        """
+        assignee_id, assignee_error = _find_user_id_for_issue_assignment(
+                client=client,
+                project_id=project_id,
+                user_query=ISSUE_ASSIGNEE_NAME,
+        )
+
+        base_input = {
+                "id": thread_or_issue_id,
+                "projectId": project_id,
+                "assigneeId": assignee_id,
+                "priority": "HIGH",
+                "label": ISSUE_LABEL_NAME,
+                "labels": [ISSUE_LABEL_NAME],
+        }
+
+        mutation_candidates = [
+                (
+                        "projectMutations.updateIssue",
+                        gql(
+                                """
+                                mutation UpdateIssueA($input: UpdateIssueInput!) {
+                                    projectMutations {
+                                        updateIssue(input: $input) {
+                                            id
+                                        }
+                                    }
+                                }
+                                """
+                        ),
+                        {"input": base_input},
+                        lambda res: ((res or {}).get("projectMutations") or {}).get("updateIssue"),
+                ),
+                (
+                        "projectMutations.issues.update",
+                        gql(
+                                """
+                                mutation UpdateIssueB($input: UpdateIssueInput!) {
+                                    projectMutations {
+                                        issues {
+                                            update(input: $input) {
+                                                id
+                                            }
+                                        }
+                                    }
+                                }
+                                """
+                        ),
+                        {"input": base_input},
+                        lambda res: (((res or {}).get("projectMutations") or {}).get("issues") or {}).get("update"),
+                ),
+                (
+                        "projectMutations.issues.updateIssue",
+                        gql(
+                                """
+                                mutation UpdateIssueC($input: UpdateIssueInput!) {
+                                    projectMutations {
+                                        issues {
+                                            updateIssue(input: $input) {
+                                                id
+                                            }
+                                        }
+                                    }
+                                }
+                                """
+                        ),
+                        {"input": base_input},
+                        lambda res: (((res or {}).get("projectMutations") or {}).get("issues") or {}).get("updateIssue"),
+                ),
+        ]
+
+        errors: List[str] = []
+        if assignee_error:
+                errors.append(assignee_error)
+
+        for mutation_name, query, variables, extractor in mutation_candidates:
+                try:
+                        result = client.httpclient.execute(query, variable_values=variables)
+                        updated = extractor(result)
+                        if updated and (isinstance(updated, dict) and updated.get("id")):
+                                assignee_note = f"assignee={assignee_id}" if assignee_id else "assignee=unresolved"
+                                return True, f"{mutation_name} ({assignee_note}, priority=HIGH, label={ISSUE_LABEL_NAME})"
+                except Exception as exc:
+                        errors.append(f"{mutation_name}: {str(exc)}")
+
+        return False, "; ".join(errors)[:450] if errors else "metadata update returned no data"
+
+
 def create_issue_for_critical_pipes(
     automate_context: AutomationContext,
     critical_pipes: List[Base],
@@ -772,6 +917,7 @@ def automate_function(
         critical_pipe_issue_id = None
         critical_pipe_issue_debug = None
         critical_pipe_issue_url = None
+        critical_pipe_issue_metadata_debug = None
         if cluster_4_massive:
             try:
                 critical_pipe_issue_id, critical_pipe_issue_debug = create_issue_for_critical_pipes(
@@ -785,10 +931,25 @@ def automate_function(
                         critical_pipe_issue_url = (
                             f"{server_url}/projects/{project_id}/threads/{critical_pipe_issue_id}"
                         )
+                    try:
+                        metadata_ok, metadata_info = apply_issue_metadata_defaults(
+                            client=automate_context.speckle_client,
+                            project_id=automate_context.automation_run_data.project_id,
+                            thread_or_issue_id=critical_pipe_issue_id,
+                        )
+                        if metadata_ok:
+                            critical_pipe_issue_metadata_debug = f"metadata_applied={metadata_info}"
+                        else:
+                            critical_pipe_issue_metadata_debug = f"metadata_failed={metadata_info}"
+                    except Exception as metadata_exc:
+                        critical_pipe_issue_metadata_debug = (
+                            f"metadata_failed=unexpected: {str(metadata_exc)}"
+                        )
             except Exception:
                 critical_pipe_issue_id = None
                 critical_pipe_issue_debug = "Unexpected exception while creating critical pipe issue"
                 critical_pipe_issue_url = None
+                critical_pipe_issue_metadata_debug = None
 
         total_pipes = (
             len(cluster_1_optimal)
@@ -895,6 +1056,8 @@ def automate_function(
                 issue_summary += f", url={critical_pipe_issue_url}"
             if critical_pipe_issue_debug:
                 issue_summary += f", source={critical_pipe_issue_debug}"
+            if critical_pipe_issue_metadata_debug:
+                issue_summary += f", {critical_pipe_issue_metadata_debug}"
             summary_parts.append(issue_summary)
         elif cluster_4_massive and critical_pipe_issue_debug:
             summary_parts.append(f"Issue creation failed: {critical_pipe_issue_debug[:220]}")
