@@ -2,8 +2,7 @@
 
 This function creates visual heatmaps in the Speckle Viewer based on:
 - Pipe radius (4 clusters)
-- Slab panel areas (3 clusters)
-- High volume elements (flagged)
+- Slab panel areas (5 clusters)
 
 It also generates CSV/Excel reports for all structural data.
 """
@@ -48,12 +47,6 @@ SLAB_CLUSTER_2_MAX = 5000.0    # Cluster 2: 1500 <= area < 5000
 SLAB_CLUSTER_3_MAX = 12500.0   # Cluster 3: 5000 <= area < 12500
 SLAB_CLUSTER_4_MAX = 25000.0   # Cluster 4: 12500 <= area < 25000
 # Cluster 5: area >= 25000
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# VOLUME THRESHOLD (in cubic meters)
-# ═══════════════════════════════════════════════════════════════════════════════
-HIGH_VOLUME_THRESHOLD = 10.0  # Elements with volume > 10 m³
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PROPERTY EXTRACTION HELPERS
@@ -450,9 +443,8 @@ def automate_function(
 
     Features:
     1. Pipe Radius Heatmap (4 clusters)
-    2. Slab Panel Area Heatmap (3 clusters)
-    3. High Volume Element Flags
-    4. CSV/Excel Report Generation
+    2. Slab Panel Area Heatmap (5 clusters)
+    3. CSV/Excel Report Generation
 
     Args:
         automate_context: Runtime context providing access to Speckle data.
@@ -620,34 +612,13 @@ def automate_function(
         )
 
         # ═══════════════════════════════════════════════════════════════════════
-        # 4. HIGH VOLUME ELEMENTS FLAG
         # ═══════════════════════════════════════════════════════════════════════
-        high_volume_elements: List[Base] = []
-        
-        for obj in all_objects:
-            # Check any of the volume properties
-            volume = (
-                get_floor_slab_volume(obj) or
-                get_cables_volume(obj) or
-                get_truss_belt_volume(obj)
-            )
-            if volume is not None and volume > HIGH_VOLUME_THRESHOLD:
-                high_volume_elements.append(obj)
-        
-        if high_volume_elements:
-            automate_context.attach_error_to_objects(
-                category="High Volume (> 10m³)",
-                affected_objects=high_volume_elements,
-                message=f"{len(high_volume_elements)} elements - High Material Intensity Element - Review for Optimization",
-            )
-
-        # ═══════════════════════════════════════════════════════════════════════
-        # 5. GENERATE REPORTS (NEW)
+        # 4. GENERATE REPORTS
         # ═══════════════════════════════════════════════════════════════════════
         files_generated = generate_reports(all_elements_data, automate_context)
 
         # ═══════════════════════════════════════════════════════════════════════
-        # 6. SET CONTEXT VIEW AND MARK SUCCESS
+        # 5. SET CONTEXT VIEW AND MARK SUCCESS
         # ═══════════════════════════════════════════════════════════════════════
         automate_context.set_context_view()
 
@@ -673,9 +644,6 @@ def automate_function(
                 summary_parts.append(f"Collections found: {list(collection_names_found)[:5]}")
             else:
                 summary_parts.append("No collections detected")
-        
-        if high_volume_elements:
-            summary_parts.append(f"High Volume Flags: {len(high_volume_elements)} elements")
         
         if files_generated > 0:
             summary_parts.append(f"Reports Generated: {files_generated} files")
