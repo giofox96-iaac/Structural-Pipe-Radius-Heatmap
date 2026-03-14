@@ -152,6 +152,10 @@ COLLECTION_SPECIFIC_COLUMNS = {
 def _get_collection_report_columns(collection_name: str) -> List[str]:
     """Return the relevant report columns for a specific collection."""
     collection_lower = (collection_name or "").strip().lower()
+
+    if "project kpis" in collection_lower:
+        return ["collection", "KPI_Name", "KPI_Value", "KPI_Description"]
+
     for key, specific_columns in COLLECTION_SPECIFIC_COLUMNS.items():
         if key in collection_lower:
             return COMMON_REPORT_COLUMNS + specific_columns
@@ -274,6 +278,24 @@ def get_truss_belt_volume(obj: Base) -> Optional[float]:
     return get_float_property(obj, ["Truss_Belt_Volume"])
 
 
+# Project KPI properties
+def get_kpi_name(obj: Base) -> Optional[str]:
+    """Extract KPI_Name from an object."""
+    value = get_property_value(obj, ["KPI_Name"])
+    return str(value) if value is not None else None
+
+
+def get_kpi_value(obj: Base) -> Optional[Any]:
+    """Extract KPI_Value from an object."""
+    return get_property_value(obj, ["KPI_Value"])
+
+
+def get_kpi_description(obj: Base) -> Optional[str]:
+    """Extract KPI_Description from an object."""
+    value = get_property_value(obj, ["KPI_Description"])
+    return str(value) if value is not None else None
+
+
 def get_name(obj: Base) -> Optional[str]:
     """Extract name from an object."""
     value = get_property_value(obj, ["name", "Name", "NAME"])
@@ -362,6 +384,7 @@ def extract_element_data(obj: Base, collection_name: Optional[str] = None) -> Di
     - Cores: Structural_Role, Material, Density, Core_Height
     - Cables: Structural_Role, Material, Density, Cables_Volume
     - Belt Truss: Structural_Role, Material, Density, Truss_Belt_Volume
+    - Project KPIs: KPI_Name, KPI_Value, KPI_Description
     """
     return {
         "id": getattr(obj, "id", None),
@@ -385,6 +408,10 @@ def extract_element_data(obj: Base, collection_name: Optional[str] = None) -> Di
         "Cables_Volume": get_cables_volume(obj),
         # Belt Truss properties
         "Truss_Belt_Volume": get_truss_belt_volume(obj),
+        # Project KPI properties
+        "KPI_Name": get_kpi_name(obj),
+        "KPI_Value": get_kpi_value(obj),
+        "KPI_Description": get_kpi_description(obj),
     }
 
 
